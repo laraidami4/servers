@@ -14,7 +14,7 @@ app.use("/nascar", nascar);
 
 const PORT = process.env.PORT || 3000;
 
-const BASE_URL = "https://api.openf1.org/v1/";
+const BASE_URL = "https://api.openf1.or/v1/";
 
 const cache = new Map();
 const TTL_MS = 30 * 60 * 1000; // 30 minutes
