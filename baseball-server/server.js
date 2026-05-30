@@ -3,6 +3,8 @@ const axios = require("axios");
 const cors = require("cors");
 const compression = require("compression");
 const msgpack = require("@msgpack/msgpack");
+const http2 = require("http2");
+const crypto = require("crypto");
 const { createClient } = require("@supabase/supabase-js");
 const WebSocket = require("ws");
 
@@ -13,6 +15,16 @@ app.use(compression());
 app.use(express.json());
 
 const PORT = process.env.PORT || 3000;
+const APPLE_BUNDLE_ID = process.env.APPLE_BUNDLE_ID || "com.sportsheart.app";
+const APPLE_TEAM_ID = process.env.APPLE_TEAM_ID || "";
+const APPLE_KEY_ID = process.env.APPLE_KEY_ID || "";
+const APPLE_PRIVATE_KEY = process.env.APPLE_PRIVATE_KEY || "";
+const APPLE_PRIVATE_KEY_PATH = process.env.APPLE_PRIVATE_KEY_PATH || "";
+const APNS_PROVIDER_URL = process.env.APNS_PROVIDER_URL || null;
+const APNS_PROVIDER_AUTH = process.env.APNS_PROVIDER_AUTH || null;
+const APNS_TOPIC = APPLE_BUNDLE_ID
+  ? `${APPLE_BUNDLE_ID}.push-type.liveactivity`
+  : null;
 
 const SUPABASE_URL = process.env.SUPABASE_URL || "";
 const SUPABASE_SERVICE_ROLE_KEY = process.env.SUPABASE_SERVICE_ROLE_KEY || "";
@@ -76,6 +88,241 @@ const refreshIntervals = new Map();
 const bracketModes = new Map();
 // live-activity instance tokens keyed by gamePk / fixtureId
 const liveActivityTokens = new Map();
+const liveActivityBaseProps = new Map();
+
+function base64UrlEncode(input) {
+  return Buffer.from(input)
+    .toString("base64")
+    .replace(/=/g, "")
+    .replace(/\+/g, "-")
+    .replace(/\//g, "_");
+}
+
+function loadApplePrivateKey() {
+  if (APPLE_PRIVATE_KEY_PATH) {
+    try {
+      return require("fs").readFileSync(APPLE_PRIVATE_KEY_PATH, "utf8");
+    } catch (e) {
+      console.warn(
+        "[baseball live-activity] cannot read APPLE_PRIVATE_KEY_PATH:",
+        e?.message || e,
+      );
+    }
+  }
+
+  if (APPLE_PRIVATE_KEY) {
+    return APPLE_PRIVATE_KEY.replace(/\\n/g, "\n");
+  }
+
+  return null;
+}
+
+function generateAPNsJWT() {
+  const privateKey = loadApplePrivateKey();
+  if (!privateKey || !APPLE_TEAM_ID || !APPLE_KEY_ID) return null;
+
+  const header = base64UrlEncode(
+    JSON.stringify({ alg: "ES256", kid: APPLE_KEY_ID }),
+  );
+  const payload = base64UrlEncode(
+    JSON.stringify({ iss: APPLE_TEAM_ID, iat: Math.floor(Date.now() / 1000) }),
+  );
+  const signer = crypto.createSign("SHA256");
+  signer.update(`${header}.${payload}`);
+  signer.end();
+  const signature = signer.sign({ key: privateKey, dsaEncoding: "ieee-p1363" });
+  return `${header}.${payload}.${base64UrlEncode(signature)}`;
+}
+
+async function sendToAPNs(deviceToken, payload, opts = {}) {
+  const jwtToken = generateAPNsJWT();
+  if (!jwtToken) {
+    throw new Error(
+      "APNs credentials not configured (APPLE_PRIVATE_KEY/KEY_ID/TEAM_ID missing)",
+    );
+  }
+
+  const maxAttempts = opts.maxAttempts ?? 3;
+  let attempt = 0;
+  let lastErr = null;
+
+  while (attempt < maxAttempts) {
+    attempt += 1;
+    try {
+      const client = http2.connect("https://api.push.apple.com");
+      await new Promise((resolveRequest, rejectRequest) => {
+        client.on("error", (err) => {
+          try {
+            client.close();
+          } catch (e) {}
+          rejectRequest(err);
+        });
+
+        const request = client.request({
+          ":method": "POST",
+          ":path": `/3/device/${deviceToken}`,
+          authorization: `bearer ${jwtToken}`,
+          "apns-topic": APNS_TOPIC,
+          "apns-push-type": "liveactivity",
+          "content-type": "application/json",
+        });
+
+        let status = null;
+        request.on("response", (headers) => {
+          status = headers[":status"];
+        });
+        request.on("data", () => {});
+        request.on("end", () => {
+          try {
+            client.close();
+          } catch (e) {}
+          const sts = Number(status) || 0;
+          if ([400, 403, 404, 410].includes(sts)) {
+            try {
+              removeLiveActivityToken(deviceToken);
+            } catch (e) {}
+          }
+          resolveRequest({ status: sts || 200 });
+        });
+        request.on("error", (err) => {
+          try {
+            client.close();
+          } catch (e) {}
+          rejectRequest(err);
+        });
+
+        request.write(JSON.stringify(payload));
+        request.end();
+      });
+
+      return { status: 200 };
+    } catch (e) {
+      lastErr = e;
+      const message = String(e?.message || e || "").toLowerCase();
+      const retryable =
+        message.includes("socket") ||
+        message.includes("timeout") ||
+        message.includes("429") ||
+        message.includes("500") ||
+        message.includes("503");
+      if (!retryable || attempt >= maxAttempts) break;
+      await new Promise((resolve) => setTimeout(resolve, 200 * attempt));
+    }
+  }
+
+  throw lastErr || new Error("sendToAPNs failed");
+}
+
+async function forwardToProvider(tokenOrTokens, payload) {
+  const tokens = Array.isArray(tokenOrTokens) ? tokenOrTokens : [tokenOrTokens];
+  const results = [];
+
+  for (const token of tokens) {
+    if (APNS_PROVIDER_URL) {
+      try {
+        const headers = { "Content-Type": "application/json" };
+        if (APNS_PROVIDER_AUTH) headers.Authorization = APNS_PROVIDER_AUTH;
+        const resp = await axios.post(
+          APNS_PROVIDER_URL,
+          { token, payload },
+          { headers, timeout: 15000 },
+        );
+        results.push({ token, forwarded: true, resp: resp.data });
+        continue;
+      } catch (e) {
+        console.warn(
+          "[baseball live-activity] provider forward failed:",
+          e?.message || e,
+        );
+      }
+    }
+
+    try {
+      const apnsResp = await sendToAPNs(token, payload, { maxAttempts: 3 });
+      results.push({ token, forwarded: false, apns: apnsResp });
+    } catch (e) {
+      results.push({ token, forwarded: false, error: String(e) });
+    }
+  }
+
+  return results.length === 1 ? results[0] : results;
+}
+
+function removeLiveActivityToken(token) {
+  const key = String(token || "").trim();
+  if (!key) return;
+
+  for (const [gamePk, tokens] of liveActivityTokens.entries()) {
+    if (!tokens.has(key)) continue;
+    tokens.delete(key);
+    if (tokens.size === 0) {
+      liveActivityTokens.delete(gamePk);
+    } else {
+      liveActivityTokens.set(gamePk, tokens);
+    }
+  }
+}
+
+function getLiveActivityTokensForGame(gamePk) {
+  const key = String(gamePk || "").trim();
+  if (!key) return [];
+  return Array.from(liveActivityTokens.get(key) || []);
+}
+
+function formatStartingAt(dateTime) {
+  try {
+    if (!dateTime) return { time: null, ampm: null, ms: null, iso: null };
+    const date = new Date(dateTime);
+    if (Number.isNaN(date.getTime())) {
+      return { time: null, ampm: null, ms: null, iso: null };
+    }
+
+    const timeText = date.toLocaleTimeString("en-US", {
+      hour: "numeric",
+      minute: "2-digit",
+      hour12: true,
+      timeZone: "America/New_York",
+    });
+
+    const parts = String(timeText).split(" ");
+    return {
+      time: parts[0] || null,
+      ampm: parts[1] || null,
+      ms: date.getTime(),
+      iso: date.toISOString(),
+    };
+  } catch {
+    return { time: null, ampm: null, ms: null, iso: null };
+  }
+}
+
+function blendHexColors(firstColor, secondColor) {
+  try {
+    if (!firstColor || !secondColor) return firstColor || secondColor || null;
+
+    const normalize = (hex) => String(hex).replace(/^#/, "");
+    const parse = (hex) => {
+      if (hex.length === 3) {
+        return hex.split("").map((ch) => parseInt(ch + ch, 16));
+      }
+      return [
+        parseInt(hex.slice(0, 2), 16),
+        parseInt(hex.slice(2, 4), 16),
+        parseInt(hex.slice(4, 6), 16),
+      ];
+    };
+
+    const left = parse(normalize(firstColor));
+    const right = parse(normalize(secondColor));
+    const toHex = (value) => value.toString(16).padStart(2, "0");
+
+    return `#${toHex(Math.round((left[0] + right[0]) / 2))}${toHex(
+      Math.round((left[1] + right[1]) / 2),
+    )}${toHex(Math.round((left[2] + right[2]) / 2))}`;
+  } catch {
+    return firstColor || secondColor || null;
+  }
+}
 
 // ----------------------------------------------------------------------------
 // sports-favs MLB notifications state
@@ -245,6 +492,39 @@ const TEAM_ABBRS = {
   158: "MIL",
 };
 
+const TEAM_COLORS = {
+  "Arizona Diamondbacks": "#A71930",
+  "Atlanta Braves": "#CE1141",
+  "Baltimore Orioles": "#DF4601",
+  "Boston Red Sox": "#BD3039",
+  "Chicago White Sox": "#27251F",
+  "Chicago Cubs": "#0E3386",
+  "Cincinnati Reds": "#C6011F",
+  "Cleveland Guardians": "#E50022",
+  "Colorado Rockies": "#333366",
+  "Detroit Tigers": "#0C2340",
+  "Houston Astros": "#002D62",
+  "Kansas City Royals": "#004687",
+  "Los Angeles Angels": "#BA0021",
+  "Los Angeles Dodgers": "#005A9C",
+  "Miami Marlins": "#00A3E0",
+  "Milwaukee Brewers": "#FFC52F",
+  "Minnesota Twins": "#002B5C",
+  "New York Yankees": "#003087",
+  "New York Mets": "#FF5910",
+  Athletics: "#EFB21E",
+  "Philadelphia Phillies": "#E81828",
+  "Pittsburgh Pirates": "#FDB827",
+  "San Diego Padres": "#2F241D",
+  "San Francisco Giants": "#FD5A1E",
+  "Seattle Mariners": "#005C5C",
+  "St. Louis Cardinals": "#C41E3A",
+  "Tampa Bay Rays": "#092C5C",
+  "Texas Rangers": "#003278",
+  "Toronto Blue Jays": "#134A8E",
+  "Washington Nationals": "#AB0003",
+};
+
 function getTeamName(team) {
   const id = String(team?.id || "");
   return TEAM_NAMES[id] || team?.name || "Unknown Team";
@@ -253,6 +533,11 @@ function getTeamName(team) {
 function getTeamAbbr(team) {
   const id = String(team?.id || "");
   return TEAM_ABBRS[id] || team?.abbreviation || "UNK";
+}
+
+function getTeamColor(team) {
+  const teamName = getTeamName(team);
+  return TEAM_COLORS[teamName] || "#888888";
 }
 
 function getTeamsForGame(game) {
@@ -505,9 +790,203 @@ function ensureGameState(gamePk, game = null) {
       scoringHashes,
       finishedSent: finished,
       hydratedFromCurrentState: true,
+      lastLiveActivitySignature: null,
     });
   }
   return mlbNotifState.gameStates.get(key);
+}
+
+function buildMlbLiveActivityProps(game, baseProps = null) {
+  const gamePk = String(game?.gamePk || "");
+  const linescore = game?.linescore || {};
+  const awayEntry = game?.teams?.away || {};
+  const homeEntry = game?.teams?.home || {};
+  const awayTeam = awayEntry?.team || {};
+  const homeTeam = homeEntry?.team || {};
+  const status = game?.status || {};
+  const venue = game?.venue || {};
+  const gameDate = game?.gameDate || null;
+
+  const statusCode = String(
+    status?.codedGameState || status?.statusCode || "",
+  ).toUpperCase();
+  const awayScore = Number(awayEntry?.score ?? awayTeam?.score ?? 0);
+  const homeScore = Number(homeEntry?.score ?? homeTeam?.score ?? 0);
+  const awayWinner = awayEntry?.isWinner ?? awayTeam?.isWinner ?? false;
+  const homeWinner = homeEntry?.isWinner ?? homeTeam?.isWinner ?? false;
+  const bases = {
+    first: !!linescore?.offense?.first,
+    second: !!linescore?.offense?.second,
+    third: !!linescore?.offense?.third,
+  };
+  const balls = Number(linescore?.balls ?? 0);
+  const strikes = Number(linescore?.strikes ?? 0);
+  const outs = Number(linescore?.outs ?? 0);
+  const batter = linescore?.offense?.batter?.fullName ?? null;
+  const pitcher = linescore?.defense?.pitcher?.fullName ?? null;
+  const currentInningOrdinal = String(
+    linescore?.currentInningOrdinal || linescore?.currentInning || "",
+  );
+  const inning = String(
+    linescore?.currentInning ?? (statusCode === "F" ? 9 : null),
+  );
+  const inningState =
+    linescore?.isTopInning === true
+      ? "Top"
+      : linescore?.isTopInning === false
+        ? "Bottom"
+        : null;
+  const detailedState = String(status?.detailedState || status?.status || "");
+  const awayColor = getTeamColor(awayTeam);
+  const homeColor = getTeamColor(homeTeam);
+  const baseHome = baseProps?.home || {};
+  const baseAway = baseProps?.away || {};
+  const baseLeague = baseProps?.league || {};
+  const baseVenue = baseProps?.venue || {};
+  const baseColors = baseProps?.colors || {};
+  const baseUrl = baseProps?.url || null;
+
+  return {
+    gamePk,
+    id: gamePk,
+    sport: "mlb",
+    url: baseUrl || `sportsheart://mlb/game/${gamePk}`,
+    startingAt: formatStartingAt(gameDate),
+    status: {
+      short_name: statusCode || (status?.statusCode === "F" ? "F" : "S"),
+      text: detailedState,
+      inning,
+      currentInningOrdinal,
+      inningState,
+      balls,
+      strikes,
+      outs,
+      batter,
+      pitcher,
+      bases,
+      ticking: statusCode === "I" || statusCode === "M",
+    },
+    bases,
+    home: {
+      ...baseHome,
+      name: homeTeam?.name || "Home",
+      shortName:
+        homeTeam?.abbreviation ||
+        homeTeam?.shortName ||
+        String(homeTeam?.name || "HOME")
+          .slice(0, 3)
+          .toUpperCase(),
+      score: homeScore,
+      winner: homeWinner,
+      logo: baseHome?.logo ?? null,
+      logoName: `home_${gamePk}.png`,
+    },
+    away: {
+      ...baseAway,
+      name: awayTeam?.name || "Away",
+      shortName:
+        awayTeam?.abbreviation ||
+        awayTeam?.shortName ||
+        String(awayTeam?.name || "AWAY")
+          .slice(0, 3)
+          .toUpperCase(),
+      score: awayScore,
+      winner: awayWinner,
+      logo: baseAway?.logo ?? null,
+      logoName: `away_${gamePk}.png`,
+    },
+    league: {
+      ...baseLeague,
+      name: game?.gameType === "R" ? "MLB" : "MLB",
+      logo: baseLeague?.logo ?? null,
+    },
+    venue: {
+      ...baseVenue,
+      name: venue?.name || baseVenue?.name || "Venue",
+    },
+    colors: {
+      ...baseColors,
+      home: homeColor || baseColors.home || "#888888",
+      away: awayColor || baseColors.away || "#888888",
+      blended:
+        blendHexColors(
+          homeColor || baseColors.home,
+          awayColor || baseColors.away,
+        ) ||
+        baseColors.blended ||
+        "#888888",
+    },
+  };
+}
+
+function buildMlbLiveActivitySignature(game) {
+  const linescore = game?.linescore || {};
+  const awayEntry = game?.teams?.away || {};
+  const homeEntry = game?.teams?.home || {};
+  return [
+    String(game?.status?.codedGameState || game?.status?.statusCode || ""),
+    String(game?.status?.detailedState || game?.status?.status || ""),
+    String(linescore?.currentInning ?? ""),
+    String(linescore?.currentInningOrdinal || ""),
+    String(
+      linescore?.isTopInning === true
+        ? "top"
+        : linescore?.isTopInning === false
+          ? "bottom"
+          : "",
+    ),
+    String(linescore?.balls ?? 0),
+    String(linescore?.strikes ?? 0),
+    String(linescore?.outs ?? 0),
+    String(awayEntry?.score ?? 0),
+    String(homeEntry?.score ?? 0),
+    String(linescore?.offense?.first ? 1 : 0),
+    String(linescore?.offense?.second ? 1 : 0),
+    String(linescore?.offense?.third ? 1 : 0),
+    String(linescore?.offense?.batter?.fullName || ""),
+    String(linescore?.defense?.pitcher?.fullName || ""),
+  ].join("|");
+}
+
+async function pushMlbLiveActivityUpdate(game) {
+  const gamePk = String(game?.gamePk || "");
+  if (!gamePk) return { sent: false, reason: "missing-gamePk" };
+
+  const tokens = getLiveActivityTokensForGame(gamePk);
+  if (tokens.length === 0) return { sent: false, reason: "no-tokens" };
+
+  const gameState = ensureGameState(gamePk, game);
+  const signature = buildMlbLiveActivitySignature(game);
+  if (gameState.lastLiveActivitySignature === signature) {
+    return { sent: false, reason: "unchanged", tokenCount: tokens.length };
+  }
+
+  gameState.lastLiveActivitySignature = signature;
+  const baseProps = liveActivityBaseProps.get(gamePk) || null;
+
+  const payload = {
+    aps: {
+      event: "update",
+      "content-state": {
+        name: "FootballLiveActivity",
+        props: JSON.stringify(buildMlbLiveActivityProps(game, baseProps)),
+      },
+      timestamp: Math.floor(Date.now() / 1000),
+    },
+  };
+
+  const forwarded = await forwardToProvider(tokens, payload);
+  return { sent: true, tokenCount: tokens.length, forwarded };
+}
+
+async function fetchMlbGameForLiveActivity(gamePk) {
+  const key = String(gamePk || "").trim();
+  if (!key) return null;
+
+  const url = `${BASE_URL}v1/schedule/games/?sportId=1&gamePk=${encodeURIComponent(key)}&hydrate=linescore&fields=${encodeURIComponent("dates,games,gamePk,gameType,gameDate,status,codedGameState,detailedState,teams,away,team,id,name,score,isWinner,home,linescore,currentInning,currentInningOrdinal,isTopInning,defense,pitcher,id,fullName,offense,batter,first,second,third,balls,strikes,outs,venue")}`;
+  const res = await axios.get(url, { timeout: 10000 });
+  const games = flattenGames(res.data || {});
+  return games.find((entry) => String(entry?.gamePk) === key) || null;
 }
 
 function ordinalSuffix(n) {
@@ -641,6 +1120,21 @@ async function processMlbNotificationsTick() {
     }
 
     const gameSubscribers = getSubscribersForGame(game, subscribers);
+
+    try {
+      const liveActivityResult = await pushMlbLiveActivityUpdate(game);
+      if (liveActivityResult?.sent) {
+        console.log(
+          `[sports-favs] mlb live-activity update gamePk=${gamePk} tokenCount=${liveActivityResult.tokenCount} date=${dateStr}`,
+        );
+      }
+    } catch (e) {
+      console.warn(
+        `[sports-favs] mlb live-activity update failed gamePk=${gamePk}:`,
+        e?.message || e,
+      );
+    }
+
     if (gameSubscribers.length === 0) continue;
 
     if (isGameStarted(game) && !gameState.startedSent) {
@@ -4149,6 +4643,16 @@ app.post("/live-activity/register-activity-token", (req, res) => {
   try {
     const { gamePk, fixtureId, token } = req.body || {};
     const key = String(gamePk || fixtureId || "").trim();
+
+    console.log("[baseball live-activity] register-activity-token:start", {
+      gamePk: gamePk || null,
+      fixtureId: fixtureId || null,
+      key: key || null,
+      token: token
+        ? `${String(token).slice(0, 8)}…(${String(token).length})`
+        : null,
+    });
+
     if (!key || !token) {
       return res
         .status(400)
@@ -4158,9 +4662,43 @@ app.post("/live-activity/register-activity-token", (req, res) => {
     const tokens = liveActivityTokens.get(key) || new Set();
     tokens.add(String(token));
     liveActivityTokens.set(key, tokens);
+    if (req.body?.props) {
+      liveActivityBaseProps.set(key, req.body.props);
+    }
+
+    console.log("[baseball live-activity] register-activity-token:done", {
+      key,
+      tokenCount: tokens.size,
+    });
 
     return res.json({ ok: true, tokenCount: tokens.size });
   } catch (err) {
+    console.error("[baseball live-activity] register-activity-token:error", {
+      error: err?.message || String(err),
+    });
+    return res.status(500).json({ error: err.message });
+  }
+});
+
+app.post("/live-activity/update", async (req, res) => {
+  try {
+    const { gamePk, fixtureId } = req.body || {};
+    const key = String(gamePk || fixtureId || "").trim();
+    if (!key) {
+      return res.status(400).json({ error: "gamePk or fixtureId required" });
+    }
+
+    const game = await fetchMlbGameForLiveActivity(key);
+    if (!game) {
+      return res.status(404).json({ error: "Game not found" });
+    }
+
+    const result = await pushMlbLiveActivityUpdate(game);
+    return res.json({ ok: true, key, ...result });
+  } catch (err) {
+    console.error("[baseball live-activity] update:error", {
+      error: err?.message || String(err),
+    });
     return res.status(500).json({ error: err.message });
   }
 });
