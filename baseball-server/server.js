@@ -74,6 +74,8 @@ const TTL_MS = 30 * 60 * 1000; // 30 minutes
 const refreshIntervals = new Map();
 // track special modes for bracket polling
 const bracketModes = new Map();
+// live-activity instance tokens keyed by gamePk / fixtureId
+const liveActivityTokens = new Map();
 
 // ----------------------------------------------------------------------------
 // sports-favs MLB notifications state
@@ -488,10 +490,15 @@ function ensureGameState(gamePk, game = null) {
   if (!mlbNotifState.gameStates.has(key)) {
     const started = game ? isGameStarted(game) : false;
     const finished = game ? isGameFinished(game) : false;
-    const scoringPlays = Array.isArray(game?.scoringPlays) ? game.scoringPlays : [];
-    const scoringHashes = started || finished
-      ? new Set(scoringPlays.map((play) => buildScoringHash(play)).filter(Boolean))
-      : new Set();
+    const scoringPlays = Array.isArray(game?.scoringPlays)
+      ? game.scoringPlays
+      : [];
+    const scoringHashes =
+      started || finished
+        ? new Set(
+            scoringPlays.map((play) => buildScoringHash(play)).filter(Boolean),
+          )
+        : new Set();
 
     mlbNotifState.gameStates.set(key, {
       startedSent: started,
@@ -580,7 +587,8 @@ async function processMlbNotificationsTick() {
 
     const gameState = ensureGameState(gamePk, game);
 
-    const { awayName, homeName, awayOgName, homeOgName, awayAbbr, homeAbbr } = getTeamsForGame(game);
+    const { awayName, homeName, awayOgName, homeOgName, awayAbbr, homeAbbr } =
+      getTeamsForGame(game);
 
     const statusKey = `${String(game?.status?.codedGameState || "")}|${String(game?.status?.detailedState || "")}`;
     if (gameState.lastStatusKey !== statusKey) {
@@ -622,7 +630,9 @@ async function processMlbNotificationsTick() {
       .map((play) => buildScoringHash(play))
       .join("||");
     if (gameState.lastScoringSignature !== scoringSignature) {
-      const firstSeen = gameState.hydratedFromCurrentState ? "hydrated" : "live";
+      const firstSeen = gameState.hydratedFromCurrentState
+        ? "hydrated"
+        : "live";
       console.log(
         `[sports-favs] mlb scoring update gamePk=${gamePk} fromCount=${gameState.lastScoringSignature ? gameState.lastScoringSignature.split("||").filter(Boolean).length : 0} toCount=${scoringPlays.length} date=${dateStr} state=${firstSeen}`,
       );
@@ -1337,7 +1347,8 @@ app.post(
         });
       }
 
-      const { awayName, homeName, awayOgName, homeOgName, awayAbbr, homeAbbr } = getTeamsForGame(game);
+      const { awayName, homeName, awayOgName, homeOgName, awayAbbr, homeAbbr } =
+        getTeamsForGame(game);
       const gamePk = String(game?.gamePk || "");
 
       const messages = [];
@@ -4130,6 +4141,27 @@ app.get("/bb/team/:code", async (req, res) => {
       error: "Failed to build MLB team payload",
       details: err.message,
     });
+  }
+});
+
+// Live Activity token registration for MLB games
+app.post("/live-activity/register-activity-token", (req, res) => {
+  try {
+    const { gamePk, fixtureId, token } = req.body || {};
+    const key = String(gamePk || fixtureId || "").trim();
+    if (!key || !token) {
+      return res
+        .status(400)
+        .json({ error: "gamePk/fixtureId and token required" });
+    }
+
+    const tokens = liveActivityTokens.get(key) || new Set();
+    tokens.add(String(token));
+    liveActivityTokens.set(key, tokens);
+
+    return res.json({ ok: true, tokenCount: tokens.size });
+  } catch (err) {
+    return res.status(500).json({ error: err.message });
   }
 });
 
