@@ -4927,7 +4927,11 @@ app.post("/live-activity/start", async (req, res) => {
     });
 
     if (!result.sent) {
-      return res.status(409).json({ ok: false, ...result });
+      if (result.reason === "no-push-to-start-tokens") {
+        return res.status(409).json({ ok: false, ...result });
+      }
+
+      return res.status(503).json({ ok: false, ...result });
     }
 
     return res.json({ ok: true, key, ...result });
