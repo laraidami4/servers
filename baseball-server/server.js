@@ -1165,6 +1165,11 @@ async function pushMlbLiveActivityStart({ fixtureId, bundleId, payload }) {
       timestamp: Math.floor(Date.now() / 1000),
       "attributes-type": "LiveActivityAttributes",
       attributes: {},
+      alert: {
+        title: "",
+        body: "",
+        sound: "default",
+      },
       "content-state": {
         name: "FootballLiveActivity",
         props:
