@@ -89,6 +89,11 @@ const bracketModes = new Map();
 // live-activity instance tokens keyed by gamePk / fixtureId
 const liveActivityTokens = new Map();
 const liveActivityBaseProps = new Map();
+const MLB_LIVE_ACTIVITY_POLL_MS = 5000;
+
+function logMlbLiveActivity(event, details = {}) {
+  console.log(`[baseball live-activity] ${event}`, details);
+}
 
 function base64UrlEncode(input) {
   return Buffer.from(input)
@@ -150,6 +155,10 @@ async function sendToAPNs(deviceToken, payload, opts = {}) {
     attempt += 1;
     try {
       const client = http2.connect("https://api.push.apple.com");
+      logMlbLiveActivity("apns-connect", {
+        deviceToken: String(deviceToken || "").slice(0, 8),
+        attempt,
+      });
       await new Promise((resolveRequest, rejectRequest) => {
         client.on("error", (err) => {
           try {
@@ -182,6 +191,10 @@ async function sendToAPNs(deviceToken, payload, opts = {}) {
               removeLiveActivityToken(deviceToken);
             } catch (e) {}
           }
+          logMlbLiveActivity("apns-response", {
+            deviceToken: String(deviceToken || "").slice(0, 8),
+            status: sts || 200,
+          });
           resolveRequest({ status: sts || 200 });
         });
         request.on("error", (err) => {
@@ -198,6 +211,11 @@ async function sendToAPNs(deviceToken, payload, opts = {}) {
       return { status: 200 };
     } catch (e) {
       lastErr = e;
+      logMlbLiveActivity("apns-error", {
+        deviceToken: String(deviceToken || "").slice(0, 8),
+        attempt,
+        error: e?.message || String(e),
+      });
       const message = String(e?.message || e || "").toLowerCase();
       const retryable =
         message.includes("socket") ||
@@ -222,6 +240,10 @@ async function forwardToProvider(tokenOrTokens, payload) {
       try {
         const headers = { "Content-Type": "application/json" };
         if (APNS_PROVIDER_AUTH) headers.Authorization = APNS_PROVIDER_AUTH;
+        logMlbLiveActivity("provider-forward", {
+          token: String(token || "").slice(0, 8),
+          target: APNS_PROVIDER_URL,
+        });
         const resp = await axios.post(
           APNS_PROVIDER_URL,
           { token, payload },
@@ -230,10 +252,10 @@ async function forwardToProvider(tokenOrTokens, payload) {
         results.push({ token, forwarded: true, resp: resp.data });
         continue;
       } catch (e) {
-        console.warn(
-          "[baseball live-activity] provider forward failed:",
-          e?.message || e,
-        );
+        logMlbLiveActivity("provider-forward-error", {
+          token: String(token || "").slice(0, 8),
+          error: e?.message || String(e),
+        });
       }
     }
 
@@ -976,6 +998,12 @@ async function pushMlbLiveActivityUpdate(game) {
   };
 
   const forwarded = await forwardToProvider(tokens, payload);
+  logMlbLiveActivity("update-sent", {
+    gamePk,
+    tokenCount: tokens.length,
+    signature,
+    forwarded: Array.isArray(forwarded) ? forwarded.length : 1,
+  });
   return { sent: true, tokenCount: tokens.length, forwarded };
 }
 
@@ -984,9 +1012,81 @@ async function fetchMlbGameForLiveActivity(gamePk) {
   if (!key) return null;
 
   const url = `${BASE_URL}v1/schedule/games/?sportId=1&gamePk=${encodeURIComponent(key)}&hydrate=linescore&fields=${encodeURIComponent("dates,games,gamePk,gameType,gameDate,status,codedGameState,detailedState,teams,away,team,id,name,score,isWinner,home,linescore,currentInning,currentInningOrdinal,isTopInning,defense,pitcher,id,fullName,offense,batter,first,second,third,balls,strikes,outs,venue")}`;
+  logMlbLiveActivity("fetch-start", { gamePk: key, url });
   const res = await axios.get(url, { timeout: 10000 });
   const games = flattenGames(res.data || {});
-  return games.find((entry) => String(entry?.gamePk) === key) || null;
+  const game = games.find((entry) => String(entry?.gamePk) === key) || null;
+  logMlbLiveActivity("fetch-done", {
+    gamePk: key,
+    found: !!game,
+    gameCount: games.length,
+  });
+  return game;
+}
+
+async function processMlbLiveActivityTick() {
+  const dateStr = getMlbNotifDatePst();
+  const payload = await fetchMlbScheduleForNotifications(dateStr);
+  const games = flattenGames(payload);
+
+  logMlbLiveActivity("tick", {
+    dateStr,
+    games: games.length,
+    trackedGames: liveActivityTokens.size,
+  });
+
+  for (const game of games) {
+    try {
+      const gamePk = String(game?.gamePk || "");
+      if (!gamePk) continue;
+      const tokens = getLiveActivityTokensForGame(gamePk);
+      if (tokens.length === 0) continue;
+
+      const state = ensureGameState(gamePk, game);
+      const signature = buildMlbLiveActivitySignature(game);
+      const shouldSend = state.lastLiveActivitySignature !== signature;
+      logMlbLiveActivity("game-check", {
+        gamePk,
+        tokens: tokens.length,
+        shouldSend,
+        status: String(
+          game?.status?.codedGameState || game?.status?.detailedState || "",
+        ),
+        inning: game?.linescore?.currentInning ?? null,
+        inningState:
+          game?.linescore?.isTopInning === true
+            ? "Top"
+            : game?.linescore?.isTopInning === false
+              ? "Bottom"
+              : null,
+        scores: {
+          away: game?.teams?.away?.score ?? 0,
+          home: game?.teams?.home?.score ?? 0,
+        },
+      });
+
+      if (shouldSend) {
+        await pushMlbLiveActivityUpdate(game);
+      }
+    } catch (error) {
+      logMlbLiveActivity("game-error", {
+        error: error?.message || String(error),
+      });
+    }
+  }
+}
+
+function startMlbLiveActivityLoop() {
+  logMlbLiveActivity("loop-start", { pollMs: MLB_LIVE_ACTIVITY_POLL_MS });
+  setInterval(async () => {
+    try {
+      await processMlbLiveActivityTick();
+    } catch (error) {
+      logMlbLiveActivity("loop-error", {
+        error: error?.message || String(error),
+      });
+    }
+  }, MLB_LIVE_ACTIVITY_POLL_MS);
 }
 
 function ordinalSuffix(n) {
@@ -4644,7 +4744,7 @@ app.post("/live-activity/register-activity-token", (req, res) => {
     const { gamePk, fixtureId, token } = req.body || {};
     const key = String(gamePk || fixtureId || "").trim();
 
-    console.log("[baseball live-activity] register-activity-token:start", {
+    logMlbLiveActivity("register-token-start", {
       gamePk: gamePk || null,
       fixtureId: fixtureId || null,
       key: key || null,
@@ -4666,14 +4766,14 @@ app.post("/live-activity/register-activity-token", (req, res) => {
       liveActivityBaseProps.set(key, req.body.props);
     }
 
-    console.log("[baseball live-activity] register-activity-token:done", {
+    logMlbLiveActivity("register-token-done", {
       key,
       tokenCount: tokens.size,
     });
 
     return res.json({ ok: true, tokenCount: tokens.size });
   } catch (err) {
-    console.error("[baseball live-activity] register-activity-token:error", {
+    logMlbLiveActivity("register-token-error", {
       error: err?.message || String(err),
     });
     return res.status(500).json({ error: err.message });
@@ -4696,7 +4796,7 @@ app.post("/live-activity/update", async (req, res) => {
     const result = await pushMlbLiveActivityUpdate(game);
     return res.json({ ok: true, key, ...result });
   } catch (err) {
-    console.error("[baseball live-activity] update:error", {
+    logMlbLiveActivity("update-error", {
       error: err?.message || String(err),
     });
     return res.status(500).json({ error: err.message });
@@ -4705,17 +4805,19 @@ app.post("/live-activity/update", async (req, res) => {
 
 // Start server and warm cache
 app.listen(PORT, async () => {
-  console.log(`Baseball server listening on port ${PORT}`);
+  logMlbLiveActivity("server-start", { port: PORT });
   await warmLeagues();
   await warmBBTeams();
   startMlbNotificationsLoop();
+  startMlbLiveActivityLoop();
   loadMlbFavSubscribers()
-    .then((rows) => logMlbSubscriberTokens("startup-db", rows))
+    .then((rows) =>
+      logMlbLiveActivity("startup-db-subscribers", { count: rows.length }),
+    )
     .catch((e) =>
-      console.warn(
-        "[sports-favs] failed to log startup mlb_fav snapshot:",
-        e?.message || e,
-      ),
+      logMlbLiveActivity("startup-db-subscribers-error", {
+        error: e?.message || String(e),
+      }),
     );
   // Refresh leagues periodically (every TTL_MS)
   setInterval(warmLeagues, TTL_MS);

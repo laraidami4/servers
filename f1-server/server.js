@@ -4130,79 +4130,51 @@ nascar.get("/race/:race_id/:status?", async (req, res) => {
 });
 
 async function warmUpAll() {
-  try {
-    // fetch meetings and sessions first
-    await fetchAndCache("meetings", `${BASE_URL}meetings`);
-    ensureRefreshInterval("meetings", `${BASE_URL}meetings`, TTL_6H);
-    await fetchAndCache("sessions", `${BASE_URL}sessions`);
-    ensureRefreshInterval("sessions", `${BASE_URL}sessions`, TTL_6H);
+  const warmupEntry = async (key, url, ttl) => {
+    try {
+      await fetchAndCache(key, url);
+    } catch (e) {
+      console.warn(`Warm-up fetch failed for ${key}:`, e?.message || e);
+    }
+    ensureRefreshInterval(key, url, ttl);
+  };
 
-    // fetch drivers and championship & session data
-    await fetchAndCache("drivers", `${BASE_URL}drivers`).catch(() => {});
-    ensureRefreshInterval("drivers", `${BASE_URL}drivers`, TTL_MS);
-    await fetchAndCache(
-      "championship_drivers",
-      `${BASE_URL}championship_drivers`,
-    ).catch(() => {});
-    ensureRefreshInterval(
-      "championship_drivers",
-      `${BASE_URL}championship_drivers`,
-      TTL_1H,
-    );
-    await fetchAndCache(
-      "championship_teams",
-      `${BASE_URL}championship_teams`,
-    ).catch(() => {});
-    ensureRefreshInterval(
-      "championship_teams",
-      `${BASE_URL}championship_teams`,
-      TTL_1H,
-    );
-    await fetchAndCache("session_result", `${BASE_URL}session_result`).catch(
-      () => {},
-    );
-    ensureRefreshInterval(
-      "session_result",
-      `${BASE_URL}session_result`,
-      TTL_1H,
-    );
-    await fetchAndCache("starting_grid", `${BASE_URL}starting_grid`).catch(
-      () => {},
-    );
-    ensureRefreshInterval("starting_grid", `${BASE_URL}starting_grid`, TTL_1H);
+  // fetch meetings and sessions first
+  await warmupEntry("meetings", `${BASE_URL}meetings`, TTL_6H);
+  await warmupEntry("sessions", `${BASE_URL}sessions`, TTL_6H);
 
-    // fetch NASCAR data on startup
-    const currentYear = new Date().getFullYear();
-    await fetchAndCache(
-      "nascar_races",
-      `https://cf.nascar.com/cacher/${currentYear}/race_list_basic.json`,
-    ).catch(() => {});
-    ensureRefreshInterval(
-      "nascar_races",
-      `https://cf.nascar.com/cacher/${currentYear}/race_list_basic.json`,
-      TTL_6H,
-    );
-    await fetchAndCache(
-      "nascar_drivers",
-      "https://cf.nascar.com/cacher/drivers.json",
-    ).catch(() => {});
-    ensureRefreshInterval(
-      "nascar_drivers",
-      "https://cf.nascar.com/cacher/drivers.json",
-      TTL_6H,
-    );
-    await fetchAndCache(
-      "nascar_tracks",
-      "https://cf.nascar.com/cacher/tracks.json",
-    ).catch(() => {});
-    ensureRefreshInterval(
-      "nascar_tracks",
-      "https://cf.nascar.com/cacher/tracks.json",
-      TTL_6H,
-    );
-  } catch (e) {
-    console.warn("Warm-up fetch failed:", e?.message || e);
-  }
+  // fetch drivers and championship & session data
+  await warmupEntry("drivers", `${BASE_URL}drivers`, TTL_MS);
+  await warmupEntry(
+    "championship_drivers",
+    `${BASE_URL}championship_drivers`,
+    TTL_1H,
+  );
+  await warmupEntry(
+    "championship_teams",
+    `${BASE_URL}championship_teams`,
+    TTL_1H,
+  );
+  await warmupEntry("session_result", `${BASE_URL}session_result`, TTL_1H);
+  await warmupEntry("starting_grid", `${BASE_URL}starting_grid`, TTL_1H);
+
+  // fetch NASCAR data on startup
+  const currentYear = new Date().getFullYear();
+  await warmupEntry(
+    "nascar_races",
+    `https://cf.nascar.com/cacher/${currentYear}/race_list_basic.json`,
+    TTL_6H,
+  );
+  await warmupEntry(
+    "nascar_drivers",
+    "https://cf.nascar.com/cacher/drivers.json",
+    TTL_6H,
+  );
+  await warmupEntry(
+    "nascar_tracks",
+    "https://cf.nascar.com/cacher/tracks.json",
+    TTL_6H,
+  );
 }
 
 app.listen(PORT, async () => {
