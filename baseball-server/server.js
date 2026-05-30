@@ -1068,6 +1068,23 @@ async function pushMlbLiveActivityStart({ fixtureId, bundleId, payload }) {
   }
 
   const forwarded = await forwardToProvider(tokens, startPayload);
+  const hasForwardError = Array.isArray(forwarded)
+    ? forwarded.some((entry) => entry?.error)
+    : !!forwarded?.error;
+
+  if (hasForwardError) {
+    const errorDetails = Array.isArray(forwarded)
+      ? forwarded.map((entry) => entry?.error).filter(Boolean)
+      : [forwarded.error].filter(Boolean);
+    return {
+      sent: false,
+      reason: "forwarding-failed",
+      tokenCount: tokens.length,
+      forwarded,
+      errorDetails,
+    };
+  }
+
   logMlbLiveActivity("start-sent", {
     fixtureId: fixtureKey || null,
     bundleId: bundleKey || null,
