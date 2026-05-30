@@ -291,6 +291,38 @@ async function addPushToStartToken(bundleId, token) {
   const tokenKey = String(token || "").trim();
   if (!bundleKey || !tokenKey) return false;
 
+  if (supabaseAdmin) {
+    try {
+      await supabaseAdmin
+        .from("live_activity_tokens")
+        .delete()
+        .eq("token", tokenKey);
+      const { error } = await supabaseAdmin
+        .from("live_activity_tokens")
+        .insert([
+          {
+            type: "bundle",
+            bundle_id: bundleKey,
+            token: tokenKey,
+            fixture_id: null,
+          },
+        ]);
+      if (error) {
+        console.warn(
+          "[baseball live-activity] supabase insert bundle token error:",
+          error?.message || error,
+        );
+      } else {
+        return true;
+      }
+    } catch (e) {
+      console.warn(
+        "[baseball live-activity] supabase upsert bundle token failed:",
+        e?.message || e,
+      );
+    }
+  }
+
   let tokens = pushToStartTokens.get(bundleKey);
   if (!tokens) {
     tokens = new Set();
@@ -305,6 +337,38 @@ async function addFixturePushToStartToken(fixtureId, token) {
   const tokenKey = String(token || "").trim();
   if (!fixtureKey || !tokenKey) return false;
 
+  if (supabaseAdmin) {
+    try {
+      await supabaseAdmin
+        .from("live_activity_tokens")
+        .delete()
+        .eq("token", tokenKey);
+      const { error } = await supabaseAdmin
+        .from("live_activity_tokens")
+        .insert([
+          {
+            type: "fixture",
+            bundle_id: null,
+            token: tokenKey,
+            fixture_id: fixtureKey,
+          },
+        ]);
+      if (error) {
+        console.warn(
+          "[baseball live-activity] supabase insert fixture token error:",
+          error?.message || error,
+        );
+      } else {
+        return true;
+      }
+    } catch (e) {
+      console.warn(
+        "[baseball live-activity] supabase upsert fixture token failed:",
+        e?.message || e,
+      );
+    }
+  }
+
   let tokens = fixturePushToStartTokens.get(fixtureKey);
   if (!tokens) {
     tokens = new Set();
@@ -314,15 +378,61 @@ async function addFixturePushToStartToken(fixtureId, token) {
   return true;
 }
 
-function getPushToStartTokensForBundle(bundleId) {
+async function getPushToStartTokensForBundle(bundleId) {
   const bundleKey = String(bundleId || "").trim();
   if (!bundleKey) return [];
+  if (supabaseAdmin) {
+    try {
+      const { data, error } = await supabaseAdmin
+        .from("live_activity_tokens")
+        .select("token")
+        .eq("bundle_id", bundleKey)
+        .eq("type", "bundle");
+      if (!error) {
+        return Array.from(
+          new Set(
+            (data || [])
+              .map((row) => String(row?.token || "").trim())
+              .filter(Boolean),
+          ),
+        );
+      }
+    } catch (e) {
+      console.warn(
+        "[baseball live-activity] supabase select bundle tokens failed:",
+        e?.message || e,
+      );
+    }
+  }
   return Array.from(pushToStartTokens.get(bundleKey) || []);
 }
 
-function getPushToStartTokensForFixture(fixtureId) {
+async function getPushToStartTokensForFixture(fixtureId) {
   const fixtureKey = String(fixtureId || "").trim();
   if (!fixtureKey) return [];
+  if (supabaseAdmin) {
+    try {
+      const { data, error } = await supabaseAdmin
+        .from("live_activity_tokens")
+        .select("token")
+        .eq("fixture_id", fixtureKey)
+        .eq("type", "fixture");
+      if (!error) {
+        return Array.from(
+          new Set(
+            (data || [])
+              .map((row) => String(row?.token || "").trim())
+              .filter(Boolean),
+          ),
+        );
+      }
+    } catch (e) {
+      console.warn(
+        "[baseball live-activity] supabase select fixture tokens failed:",
+        e?.message || e,
+      );
+    }
+  }
   return Array.from(fixturePushToStartTokens.get(fixtureKey) || []);
 }
 
@@ -1038,10 +1148,10 @@ async function pushMlbLiveActivityStart({ fixtureId, bundleId, payload }) {
   const fixtureKey = String(fixtureId || "").trim();
   const bundleKey = String(bundleId || "").trim();
   const fixtureTokens = fixtureKey
-    ? getPushToStartTokensForFixture(fixtureKey)
+    ? await getPushToStartTokensForFixture(fixtureKey)
     : [];
   const bundleTokens = bundleKey
-    ? getPushToStartTokensForBundle(bundleKey)
+    ? await getPushToStartTokensForBundle(bundleKey)
     : [];
   const tokens = Array.from(new Set([...fixtureTokens, ...bundleTokens]));
 
