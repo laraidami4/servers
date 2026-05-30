@@ -571,12 +571,8 @@ function waitForTimeout(ms) {
 async function warmRacingDateCaches() {
   const warmupTasks = [
     refreshSessionResultCacheIfLive(),
-    getCachedWithTTL("meetings", `${BASE_URL}meetings`, TTL_6H).catch(
-      () => {},
-    ),
-    getCachedWithTTL("sessions", `${BASE_URL}sessions`, TTL_6H).catch(
-      () => {},
-    ),
+    getCachedWithTTL("meetings", `${BASE_URL}meetings`, TTL_6H).catch(() => {}),
+    getCachedWithTTL("sessions", `${BASE_URL}sessions`, TTL_6H).catch(() => {}),
     getCachedWithTTL(
       "session_result",
       `${BASE_URL}session_result`,
