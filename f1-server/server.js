@@ -55,6 +55,21 @@ function normalizeDateKey(value) {
   return parsed.toISOString().slice(0, 10);
 }
 
+function normalizeUtcDateKey(value) {
+  if (!value) return null;
+  const raw = String(value).trim();
+  if (!raw) return null;
+  const digits = raw.replace(/\D/g, "");
+  if (digits.length === 8) {
+    return `${digits.slice(0, 4)}-${digits.slice(4, 6)}-${digits.slice(6, 8)}`;
+  }
+
+  const hasTimezone = /(?:z|[+-]\d{2}:?\d{2})$/i.test(raw);
+  const parsed = new Date(hasTimezone ? raw : `${raw}Z`);
+  if (!Number.isFinite(parsed.getTime())) return null;
+  return parsed.toISOString().slice(0, 10);
+}
+
 function getSessionDateKey(session) {
   return normalizeDateKey(
     session?.date_start ||
@@ -586,7 +601,7 @@ async function warmRacingDateCaches() {
     ).catch(() => {}),
   ];
 
-  await Promise.race([Promise.allSettled(warmupTasks), waitForTimeout(2000)]);
+  void Promise.allSettled(warmupTasks);
 }
 
 function normalizeArray(payload) {
@@ -1103,7 +1118,7 @@ app.get("/racing/date/:date?", async (req, res) => {
     }
 
     const currentYear = new Date().getFullYear();
-    await warmRacingDateCaches();
+    warmRacingDateCaches();
 
     const meetingsArr = normalizeArray(cache.get("meetings")?.data);
     const sessionsArr = normalizeArray(cache.get("sessions")?.data);
@@ -1167,28 +1182,25 @@ app.get("/racing/date/:date?", async (req, res) => {
           for (const scheduleItem of race.schedule) {
             if (scheduleItem.run_type === 0) continue; // skip run_type 0
             const scheduleDate = scheduleItem.start_time_utc
-              ? normalizeDateKey(scheduleItem.start_time_utc)
+              ? normalizeUtcDateKey(scheduleItem.start_time_utc)
               : null;
             if (scheduleDate !== normalizedDate) continue;
 
             // Found matching schedule item - fetch weekend-feed for enrichment
             const weekendFeedKey = `nascar_weekend_feed:${currentYear}:${raceId}`;
-            let weekendFeed = null;
-            try {
-              const r = await getCachedWithTTL(
+            let weekendFeed = cache.get(weekendFeedKey)?.data || null;
+            if (!weekendFeed) {
+              void getCachedWithTTL(
                 weekendFeedKey,
                 `https://cf.nascar.com/cacher/${currentYear}/1/${encodeURIComponent(raceId)}/weekend-feed.json`,
                 TTL_1H,
-              ).catch(() => ({ data: null }));
-              weekendFeed = r.data || null;
-              ensureRefreshInterval(
-                weekendFeedKey,
-                `https://cf.nascar.com/cacher/${currentYear}/1/${encodeURIComponent(raceId)}/weekend-feed.json`,
-                TTL_1H,
-              );
-            } catch (e) {
-              weekendFeed = null;
+              ).catch(() => {});
             }
+            ensureRefreshInterval(
+              weekendFeedKey,
+              `https://cf.nascar.com/cacher/${currentYear}/1/${encodeURIComponent(raceId)}/weekend-feed.json`,
+              TTL_1H,
+            );
 
             // Extract winner based on run_type
             let winner = null;
@@ -1320,7 +1332,7 @@ app.get("/racing/date/:date?", async (req, res) => {
       for (const race of nascarRacesArr) {
         const dateStart = race.date_start || null;
         if (dateStart) {
-          const normalized = normalizeDateKey(dateStart);
+          const normalized = normalizeUtcDateKey(dateStart);
           if (normalized) allDates.add(normalized);
         }
       }
@@ -1342,7 +1354,7 @@ app.get("/racing/date/:date?", async (req, res) => {
     // Filter NASCAR races for the requested date
     const filteredNascarRaces = nascarRacesArr.filter((race) => {
       const raceDate = race.date_start
-        ? normalizeDateKey(race.date_start)
+        ? normalizeUtcDateKey(race.date_start)
         : null;
       return raceDate === normalizedDate;
     });
