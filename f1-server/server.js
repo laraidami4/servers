@@ -14,7 +14,7 @@ app.use("/nascar", nascar);
 
 const PORT = process.env.PORT || 3000;
 
-const BASE_URL = "https://openf1-main-production.up.railway.app/v1/";
+const BASE_URL = "https://api.openf1.org/v1/";
 
 const cache = new Map();
 const TTL_MS = 30 * 60 * 1000; // 30 minutes
@@ -564,6 +564,35 @@ async function getCachedWithTTL(key, url, ttlMs) {
   return res;
 }
 
+function waitForTimeout(ms) {
+  return new Promise((resolve) => setTimeout(resolve, ms));
+}
+
+async function warmRacingDateCaches() {
+  const warmupTasks = [
+    refreshSessionResultCacheIfLive(),
+    getCachedWithTTL("meetings", `${BASE_URL}meetings`, TTL_6H).catch(
+      () => {},
+    ),
+    getCachedWithTTL("sessions", `${BASE_URL}sessions`, TTL_6H).catch(
+      () => {},
+    ),
+    getCachedWithTTL(
+      "session_result",
+      `${BASE_URL}session_result`,
+      TTL_1H,
+    ).catch(() => {}),
+    getCachedWithTTL("drivers", `${BASE_URL}drivers`, TTL_1H).catch(() => {}),
+    getCachedWithTTL(
+      "nascar_races",
+      `https://cf.nascar.com/cacher/${new Date().getFullYear()}/race_list_basic.json`,
+      TTL_6H,
+    ).catch(() => {}),
+  ];
+
+  await Promise.race([Promise.allSettled(warmupTasks), waitForTimeout(2000)]);
+}
+
 function normalizeArray(payload) {
   if (!payload) return [];
   if (Array.isArray(payload)) return payload;
@@ -1078,29 +1107,7 @@ app.get("/racing/date/:date?", async (req, res) => {
     }
 
     const currentYear = new Date().getFullYear();
-    await refreshSessionResultCacheIfLive();
-
-    await getCachedWithTTL("meetings", `${BASE_URL}meetings`, TTL_6H).catch(
-      () => {},
-    );
-    await getCachedWithTTL("sessions", `${BASE_URL}sessions`, TTL_6H).catch(
-      () => {},
-    );
-    await getCachedWithTTL(
-      "session_result",
-      `${BASE_URL}session_result`,
-      TTL_1H,
-    ).catch(() => {});
-    await getCachedWithTTL("drivers", `${BASE_URL}drivers`, TTL_1H).catch(
-      () => {},
-    );
-
-    // Also fetch NASCAR data
-    await getCachedWithTTL(
-      "nascar_races",
-      `https://cf.nascar.com/cacher/${new Date().getFullYear()}/race_list_basic.json`,
-      TTL_6H,
-    ).catch(() => {});
+    await warmRacingDateCaches();
 
     const meetingsArr = normalizeArray(cache.get("meetings")?.data);
     const sessionsArr = normalizeArray(cache.get("sessions")?.data);
