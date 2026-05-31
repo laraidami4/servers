@@ -1243,12 +1243,27 @@ function buildMlbLiveActivityProps(game, baseProps = null) {
   const offenseTeamId = previousPlayData.teamIds.offense;
   const defenseTeamId = previousPlayData.teamIds.defense;
   const offenseBaseState = linescore?.offense || null;
-  const currentBases = {
-    first: !!offenseBaseState?.first,
-    second: !!offenseBaseState?.second,
-    third: !!offenseBaseState?.third,
+  const previousBases = baseProps?.bases || baseProps?.status?.bases || null;
+  const resolveBaseValue = (baseName) => {
+    if (
+      Object.prototype.hasOwnProperty.call(offenseBaseState || {}, baseName)
+    ) {
+      return !!offenseBaseState?.[baseName];
+    }
+
+    if (previousBases && typeof previousBases === "object") {
+      if (Object.prototype.hasOwnProperty.call(previousBases, baseName)) {
+        return !!previousBases?.[baseName];
+      }
+    }
+
+    return false;
   };
-  const bases = currentBases;
+  const bases = {
+    first: resolveBaseValue("first"),
+    second: resolveBaseValue("second"),
+    third: resolveBaseValue("third"),
+  };
   const balls = Number(linescore?.balls ?? baseProps?.status?.balls ?? 0);
   const strikes = Number(linescore?.strikes ?? baseProps?.status?.strikes ?? 0);
   const outs = Number(linescore?.outs ?? baseProps?.status?.outs ?? 0);
