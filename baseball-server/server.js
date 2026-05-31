@@ -22,6 +22,11 @@ const APPLE_PRIVATE_KEY = process.env.APPLE_PRIVATE_KEY || "";
 const APPLE_PRIVATE_KEY_PATH = process.env.APPLE_PRIVATE_KEY_PATH || "";
 const APNS_PROVIDER_URL = process.env.APNS_PROVIDER_URL || null;
 const APNS_PROVIDER_AUTH = process.env.APNS_PROVIDER_AUTH || null;
+const APNS_HOST =
+  process.env.APNS_HOST ||
+  (process.env.APNS_USE_PRODUCTION === "true"
+    ? "https://api.push.apple.com"
+    : "https://api.sandbox.push.apple.com");
 const APNS_TOPIC = APPLE_BUNDLE_ID
   ? `${APPLE_BUNDLE_ID}.push-type.liveactivity`
   : null;
@@ -163,12 +168,13 @@ async function sendToAPNs(deviceToken, payload, opts = {}) {
   while (attempt < maxAttempts) {
     attempt += 1;
     try {
-      const client = http2.connect("https://api.push.apple.com");
+      const client = http2.connect(APNS_HOST);
       logMlbLiveActivity("apns-connect", {
         deviceToken: String(deviceToken || "").slice(0, 8),
         attempt,
+        host: APNS_HOST,
       });
-      await new Promise((resolveRequest, rejectRequest) => {
+      const status = await new Promise((resolveRequest, rejectRequest) => {
         client.on("error", (err) => {
           try {
             client.close();
@@ -203,8 +209,9 @@ async function sendToAPNs(deviceToken, payload, opts = {}) {
           logMlbLiveActivity("apns-response", {
             deviceToken: String(deviceToken || "").slice(0, 8),
             status: sts || 200,
+            host: APNS_HOST,
           });
-          resolveRequest({ status: sts || 200 });
+          resolveRequest(sts || 200);
         });
         request.on("error", (err) => {
           try {
@@ -217,7 +224,7 @@ async function sendToAPNs(deviceToken, payload, opts = {}) {
         request.end();
       });
 
-      return { status: 200 };
+      return { status };
     } catch (e) {
       lastErr = e;
       logMlbLiveActivity("apns-error", {
