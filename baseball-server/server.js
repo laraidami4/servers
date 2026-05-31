@@ -593,6 +593,38 @@ function getMlbLiveActivityPreviousPlayData(game) {
   };
 }
 
+function getMlbLiveActivityMatchupText(game) {
+  const linescore =
+    game?.linescore || game?.liveData?.linescore || game?.live?.linescore || {};
+  const previousPlayData = getMlbLiveActivityPreviousPlayData(game);
+  const balls = Number(linescore?.balls ?? 0);
+  const strikes = Number(linescore?.strikes ?? 0);
+  const batter = String(linescore?.offense?.batter?.fullName || "").trim();
+  const pitcher = String(linescore?.defense?.pitcher?.fullName || "").trim();
+  const offenseTeamId = linescore?.offense?.team?.id ?? null;
+  const homeTeamId = game?.teams?.home?.team?.id ?? null;
+  const awayTeamId = game?.teams?.away?.team?.id ?? null;
+  const isTopInning = linescore?.isTopInning === true;
+  const fallbackMatchup =
+    batter || pitcher ? `${batter || "B."} vs ${pitcher || "P."}` : null;
+  const shouldUsePreviousPlayDescription =
+    (balls === 0 && strikes === 0) ||
+    (isTopInning &&
+      offenseTeamId != null &&
+      homeTeamId != null &&
+      String(offenseTeamId) === String(homeTeamId)) ||
+    (!isTopInning &&
+      offenseTeamId != null &&
+      awayTeamId != null &&
+      String(offenseTeamId) === String(awayTeamId));
+
+  if (shouldUsePreviousPlayDescription) {
+    return previousPlayData.description || fallbackMatchup;
+  }
+
+  return fallbackMatchup || previousPlayData.description || null;
+}
+
 // ----------------------------------------------------------------------------
 // sports-favs MLB notifications state
 // ----------------------------------------------------------------------------
@@ -1049,6 +1081,17 @@ function ensureGameState(gamePk, game = null) {
   return mlbNotifState.gameStates.get(key);
 }
 
+function resetMlbLiveActivityStartState(gamePk) {
+  const key = String(gamePk || "").trim();
+  if (!key) return null;
+
+  const gameState = ensureGameState(key);
+  gameState.lastLiveActivitySignature = null;
+  gameState.didSendDismissalEnd = false;
+  gameState.lastScoreSnapshot = null;
+  return gameState;
+}
+
 function buildMlbLiveActivityProps(game, baseProps = null) {
   const gamePk = String(game?.gamePk || "");
   const linescore =
@@ -1092,6 +1135,10 @@ function buildMlbLiveActivityProps(game, baseProps = null) {
     linescore?.offense?.batter?.fullName ?? baseProps?.status?.batter ?? null;
   const pitcher =
     linescore?.defense?.pitcher?.fullName ?? baseProps?.status?.pitcher ?? null;
+  const matchupText =
+    getMlbLiveActivityMatchupText(game) ??
+    baseProps?.status?.matchupText ??
+    null;
   const currentInningOrdinal = String(
     linescore?.currentInningOrdinal ||
       baseProps?.status?.currentInningOrdinal ||
@@ -1145,6 +1192,8 @@ function buildMlbLiveActivityProps(game, baseProps = null) {
       outs,
       batter,
       pitcher,
+      matchupText,
+      matchupText,
       bases,
       previousPlayDescription: previousPlayData.description,
       previousPlayBatterId: previousPlayData.matchup.batter.id,
@@ -1161,6 +1210,7 @@ function buildMlbLiveActivityProps(game, baseProps = null) {
     linescoreTeamIds: previousPlayData.teamIds,
     linescoreOffenseTeamId: offenseTeamId,
     linescoreDefenseTeamId: defenseTeamId,
+    matchupText,
     home: {
       ...baseHome,
       name: homeTeam?.name || "Home",
@@ -5279,6 +5329,8 @@ app.post("/live-activity/start", async (req, res) => {
     if (!payload) {
       return res.status(404).json({ error: "Game not found" });
     }
+
+    resetMlbLiveActivityStartState(key);
 
     const currentFixtureTokens = await getPushToStartTokensForFixture(key);
     logMlbLiveActivity("start:token-check", {
