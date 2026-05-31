@@ -328,6 +328,7 @@ async function addPushToStartToken(bundleId, token) {
     tokens = new Set();
     pushToStartTokens.set(bundleKey, tokens);
   }
+  tokens.clear();
   tokens.add(tokenKey);
 
   if (supabaseAdmin) {
@@ -335,7 +336,8 @@ async function addPushToStartToken(bundleId, token) {
       await supabaseAdmin
         .from("live_activity_tokens")
         .delete()
-        .eq("token", tokenKey);
+        .eq("type", "bundle")
+        .eq("bundle_id", bundleKey);
       const { error } = await supabaseAdmin
         .from("live_activity_tokens")
         .insert([
@@ -385,6 +387,7 @@ async function addFixturePushToStartToken(fixtureId, token) {
     tokens = new Set();
     fixturePushToStartTokens.set(fixtureKey, tokens);
   }
+  tokens.clear();
   tokens.add(tokenKey);
 
   if (supabaseAdmin) {
@@ -392,7 +395,8 @@ async function addFixturePushToStartToken(fixtureId, token) {
       await supabaseAdmin
         .from("live_activity_tokens")
         .delete()
-        .eq("token", tokenKey);
+        .eq("type", "fixture")
+        .eq("fixture_id", fixtureKey);
       const { error } = await supabaseAdmin
         .from("live_activity_tokens")
         .insert([
