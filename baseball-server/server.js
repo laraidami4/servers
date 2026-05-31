@@ -292,6 +292,13 @@ async function addPushToStartToken(bundleId, token) {
   const tokenKey = String(token || "").trim();
   if (!bundleKey || !tokenKey) return false;
 
+  let tokens = pushToStartTokens.get(bundleKey);
+  if (!tokens) {
+    tokens = new Set();
+    pushToStartTokens.set(bundleKey, tokens);
+  }
+  tokens.add(tokenKey);
+
   if (supabaseAdmin) {
     try {
       await supabaseAdmin
@@ -323,13 +330,6 @@ async function addPushToStartToken(bundleId, token) {
       );
     }
   }
-
-  let tokens = pushToStartTokens.get(bundleKey);
-  if (!tokens) {
-    tokens = new Set();
-    pushToStartTokens.set(bundleKey, tokens);
-  }
-  tokens.add(tokenKey);
   return true;
 }
 
@@ -337,6 +337,13 @@ async function addFixturePushToStartToken(fixtureId, token) {
   const fixtureKey = String(fixtureId || "").trim();
   const tokenKey = String(token || "").trim();
   if (!fixtureKey || !tokenKey) return false;
+
+  let tokens = fixturePushToStartTokens.get(fixtureKey);
+  if (!tokens) {
+    tokens = new Set();
+    fixturePushToStartTokens.set(fixtureKey, tokens);
+  }
+  tokens.add(tokenKey);
 
   if (supabaseAdmin) {
     try {
@@ -369,19 +376,13 @@ async function addFixturePushToStartToken(fixtureId, token) {
       );
     }
   }
-
-  let tokens = fixturePushToStartTokens.get(fixtureKey);
-  if (!tokens) {
-    tokens = new Set();
-    fixturePushToStartTokens.set(fixtureKey, tokens);
-  }
-  tokens.add(tokenKey);
   return true;
 }
 
 async function getPushToStartTokensForBundle(bundleId) {
   const bundleKey = String(bundleId || "").trim();
   if (!bundleKey) return [];
+  const fallbackTokens = Array.from(pushToStartTokens.get(bundleKey) || []);
   if (supabaseAdmin) {
     try {
       const { data, error } = await supabaseAdmin
@@ -391,11 +392,12 @@ async function getPushToStartTokensForBundle(bundleId) {
         .eq("type", "bundle");
       if (!error) {
         return Array.from(
-          new Set(
-            (data || [])
+          new Set([
+            ...fallbackTokens,
+            ...(data || [])
               .map((row) => String(row?.token || "").trim())
               .filter(Boolean),
-          ),
+          ]),
         );
       }
     } catch (e) {
@@ -405,12 +407,15 @@ async function getPushToStartTokensForBundle(bundleId) {
       );
     }
   }
-  return Array.from(pushToStartTokens.get(bundleKey) || []);
+  return fallbackTokens;
 }
 
 async function getPushToStartTokensForFixture(fixtureId) {
   const fixtureKey = String(fixtureId || "").trim();
   if (!fixtureKey) return [];
+  const fallbackTokens = Array.from(
+    fixturePushToStartTokens.get(fixtureKey) || [],
+  );
   if (supabaseAdmin) {
     try {
       const { data, error } = await supabaseAdmin
@@ -420,11 +425,12 @@ async function getPushToStartTokensForFixture(fixtureId) {
         .eq("type", "fixture");
       if (!error) {
         return Array.from(
-          new Set(
-            (data || [])
+          new Set([
+            ...fallbackTokens,
+            ...(data || [])
               .map((row) => String(row?.token || "").trim())
               .filter(Boolean),
-          ),
+          ]),
         );
       }
     } catch (e) {
@@ -434,7 +440,7 @@ async function getPushToStartTokensForFixture(fixtureId) {
       );
     }
   }
-  return Array.from(fixturePushToStartTokens.get(fixtureKey) || []);
+  return fallbackTokens;
 }
 
 function getLiveActivityTokensForGame(gamePk) {
@@ -1002,14 +1008,16 @@ function buildMlbLiveActivityProps(game, baseProps = null) {
       "",
   );
   const inning = String(
-    linescore?.currentInning ?? baseProps?.status?.inning ?? (effectiveStatusCode === "F" ? 9 : null),
+    linescore?.currentInning ??
+      baseProps?.status?.inning ??
+      (effectiveStatusCode === "F" ? 9 : null),
   );
   const inningState =
     linescore?.isTopInning === true
       ? "Top"
       : linescore?.isTopInning === false
         ? "Bottom"
-        : baseProps?.status?.inningState ?? null;
+        : (baseProps?.status?.inningState ?? null);
   const detailedState = String(
     status?.detailedState || status?.status || baseProps?.status?.text || "",
   );
@@ -5104,8 +5112,12 @@ app.post("/live-activity/register-push-to-start", (req, res) => {
       return res.status(400).json({ error: "bundleId and token required" });
     }
 
-    addPushToStartToken(bundleId, token).catch(() => {});
-    if (fixtureId) addFixturePushToStartToken(fixtureId, token).catch(() => {});
+    Promise.resolve(addPushToStartToken(bundleId, token)).catch(() => {});
+    if (fixtureId) {
+      Promise.resolve(addFixturePushToStartToken(fixtureId, token)).catch(
+        () => {},
+      );
+    }
 
     logMlbLiveActivity("register-push-to-start", {
       bundleId: String(bundleId),
