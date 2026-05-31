@@ -1037,9 +1037,9 @@ function buildMlbLiveActivityProps(game, baseProps = null) {
   const awayWinner = awayEntry?.isWinner ?? awayTeam?.isWinner ?? false;
   const homeWinner = homeEntry?.isWinner ?? homeTeam?.isWinner ?? false;
   const bases = {
-    first: linescore?.offense?.first ?? baseProps?.bases?.first ?? false,
-    second: linescore?.offense?.second ?? baseProps?.bases?.second ?? false,
-    third: linescore?.offense?.third ?? baseProps?.bases?.third ?? false,
+    first: !!linescore?.offense?.first,
+    second: !!linescore?.offense?.second,
+    third: !!linescore?.offense?.third,
   };
   const balls = Number(linescore?.balls ?? baseProps?.status?.balls ?? 0);
   const strikes = Number(linescore?.strikes ?? baseProps?.status?.strikes ?? 0);
@@ -1048,6 +1048,28 @@ function buildMlbLiveActivityProps(game, baseProps = null) {
     linescore?.offense?.batter?.fullName ?? baseProps?.status?.batter ?? null;
   const pitcher =
     linescore?.defense?.pitcher?.fullName ?? baseProps?.status?.pitcher ?? null;
+  const currentBatterId = String(linescore?.offense?.batter?.id ?? "");
+  const currentPitcherId = String(linescore?.defense?.pitcher?.id ?? "");
+  const previousPlay = game?.previousPlay ?? null;
+  const previousPlayDescription = String(
+    previousPlay?.result?.description || "",
+  ).trim();
+  const previousPlayBatterId = String(previousPlay?.matchup?.batter?.id ?? "");
+  const previousPlayPitcherId = String(
+    previousPlay?.matchup?.pitcher?.id ?? "",
+  );
+  const previousPlayMatchesCurrentMatchup =
+    !!previousPlayDescription &&
+    !!currentBatterId &&
+    !!currentPitcherId &&
+    previousPlayBatterId === currentBatterId &&
+    previousPlayPitcherId === currentPitcherId;
+  const matchupText =
+    previousPlayMatchesCurrentMatchup && previousPlayDescription
+      ? previousPlayDescription
+      : batter && pitcher
+        ? `${batter} (B.) vs ${pitcher} (P.)`
+        : (baseProps?.status?.matchupText ?? null);
   const currentInningOrdinal = String(
     linescore?.currentInningOrdinal ||
       baseProps?.status?.currentInningOrdinal ||
@@ -1101,6 +1123,9 @@ function buildMlbLiveActivityProps(game, baseProps = null) {
       outs,
       batter,
       pitcher,
+      matchupText,
+      previousPlayDescription: previousPlayDescription || null,
+      previousPlayMatchesCurrentMatchup,
       bases,
       ticking: effectiveStatusCode === "I" || effectiveStatusCode === "M",
     },
@@ -1162,6 +1187,7 @@ function buildMlbLiveActivitySignature(game) {
     game?.linescore || game?.liveData?.linescore || game?.live?.linescore || {};
   const awayEntry = game?.teams?.away || {};
   const homeEntry = game?.teams?.home || {};
+  const previousPlay = game?.previousPlay || null;
   return [
     String(game?.status?.codedGameState || game?.status?.statusCode || ""),
     String(game?.status?.detailedState || game?.status?.status || ""),
@@ -1179,6 +1205,9 @@ function buildMlbLiveActivitySignature(game) {
     String(linescore?.outs ?? 0),
     String(awayEntry?.score ?? 0),
     String(homeEntry?.score ?? 0),
+    String(previousPlay?.result?.description || ""),
+    String(previousPlay?.matchup?.batter?.id || ""),
+    String(previousPlay?.matchup?.pitcher?.id || ""),
     String(linescore?.offense?.first ? 1 : 0),
     String(linescore?.offense?.second ? 1 : 0),
     String(linescore?.offense?.third ? 1 : 0),
@@ -1381,47 +1410,20 @@ async function fetchMlbGameForLiveActivity(gamePk) {
   const key = String(gamePk || "").trim();
   if (!key) return null;
 
-  const url = `${BASE_URL}v1.1/game/${encodeURIComponent(key)}/feed/live`;
+  const url = `${BASE_URL}v1/schedule/games/?sportId=1&gamePk=${encodeURIComponent(key)}&hydrate=linescore,previousPlay&fields=dates,games,gamePk,gameType,gameDate,status,codedGameState,detailedState,teams,away,team,id,name,score,isWinner,home,linescore,currentInning,currentInningOrdinal,isTopInning,defense,pitcher,id,fullName,offense,batter,first,second,third,balls,strikes,outs,venue,previousPlay,result,description,matchup`;
   logMlbLiveActivity("fetch-start", { gamePk: key, url });
   const res = await axios.get(url, { timeout: 10000 });
-  const raw = res.data || {};
-  const gameData = raw.gameData || {};
-  const liveData = raw.liveData || raw.live || {};
-  const linescore = liveData?.linescore || raw.linescore || null;
-  const game = {
-    gamePk: raw.gamePk ?? Number(key),
-    gameType: gameData?.game?.type ?? gameData?.gameType ?? null,
-    gameDate: gameData?.datetime?.dateTime ?? gameData?.game?.dateTime ?? null,
-    status: gameData?.status || null,
-    venue: gameData?.venue || null,
-    teams: {
-      away: gameData?.teams?.away
-        ? {
-            team: gameData.teams.away,
-            score:
-              linescore?.teams?.away?.runs ?? gameData.teams.away.score ?? 0,
-            isWinner: gameData.teams.away.isWinner ?? false,
-          }
-        : null,
-      home: gameData?.teams?.home
-        ? {
-            team: gameData.teams.home,
-            score:
-              linescore?.teams?.home?.runs ?? gameData.teams.home.score ?? 0,
-            isWinner: gameData.teams.home.isWinner ?? false,
-          }
-        : null,
-    },
-    linescore,
-    liveData,
-    gameData,
-  };
+  const payload = res.data || {};
+  const games = Array.isArray(payload?.dates)
+    ? payload.dates.flatMap((date) => date?.games ?? [])
+    : [];
+  const game = games.find((entry) => String(entry?.gamePk) === key) || {};
   logMlbLiveActivity("fetch-done", {
     gamePk: key,
     found: !!game,
-    hasLinescore: !!linescore,
-    currentInning: linescore?.currentInning ?? null,
-    inningState: linescore?.inningState ?? null,
+    hasLinescore: !!game?.linescore,
+    currentInning: game?.linescore?.currentInning ?? null,
+    inningState: game?.linescore?.inningState ?? null,
   });
   return game;
 }
