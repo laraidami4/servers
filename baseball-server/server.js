@@ -723,7 +723,9 @@ function getMlbLiveActivityMatchupText(game) {
   const awayTeamId = game?.teams?.away?.team?.id ?? null;
   const isTopInning = linescore?.isTopInning === true;
   const fallbackMatchup =
-    batter || pitcher ? `${batter || "B."} vs ${pitcher || "P."}` : null;
+    batter || pitcher
+      ? `${batter || "B."} (B.) vs ${pitcher || "P."} (P.)`
+      : null;
   const shouldUsePreviousPlayDescription =
     (balls === 0 && strikes === 0) ||
     (isTopInning &&
@@ -1240,11 +1242,20 @@ function buildMlbLiveActivityProps(game, baseProps = null) {
   const previousPlayData = getMlbLiveActivityPreviousPlayData(game);
   const offenseTeamId = previousPlayData.teamIds.offense;
   const defenseTeamId = previousPlayData.teamIds.defense;
-  const bases = {
+  const currentBases = {
     first: !!linescore?.offense?.first,
     second: !!linescore?.offense?.second,
     third: !!linescore?.offense?.third,
   };
+  const previousBases = baseProps?.bases || baseProps?.status?.bases || null;
+  const hasCurrentBases = Object.values(currentBases).some(Boolean);
+  const hasPreviousBases =
+    previousBases && Object.values(previousBases).some(Boolean);
+  const bases = hasCurrentBases
+    ? currentBases
+    : hasPreviousBases
+      ? previousBases
+      : currentBases;
   const balls = Number(linescore?.balls ?? baseProps?.status?.balls ?? 0);
   const strikes = Number(linescore?.strikes ?? baseProps?.status?.strikes ?? 0);
   const outs = Number(linescore?.outs ?? baseProps?.status?.outs ?? 0);
