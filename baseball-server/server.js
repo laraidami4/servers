@@ -792,6 +792,7 @@ function normalizeMlbFavRecord(row) {
     userId: row?.user_id || null,
     subscriberId: row?.subscriber_id || null,
     pushToken: row?.push_token || null,
+    liveActivityToken: row?.live_activity_token || null,
     platform: row?.platform || "unknown",
     favoriteTeamIds: new Set(
       Array.isArray(row?.favorite_team_ids)
@@ -847,6 +848,7 @@ async function upsertMlbFavRow({
   userId,
   subscriberId,
   pushToken,
+  liveActivityToken,
   platform,
   favoriteTeamIds,
 }) {
@@ -859,7 +861,7 @@ async function upsertMlbFavRow({
     ? await supabaseAdmin
         .from(MLB_FAV_TABLE)
         .select(
-          "user_id,subscriber_id,push_token,platform,favorite_team_ids,updated_at",
+          "user_id,subscriber_id,push_token,live_activity_token,platform,favorite_team_ids,updated_at",
         )
         .eq("user_id", key)
         .maybeSingle()
@@ -871,6 +873,10 @@ async function upsertMlbFavRow({
     subscriber_id: String(subscriberId || existing?.subscriberId || key).trim(),
     push_token:
       pushToken !== undefined ? pushToken || null : existing?.pushToken || null,
+    live_activity_token:
+      liveActivityToken !== undefined
+        ? liveActivityToken || null
+        : existing?.liveActivityToken || null,
     platform: platform || existing?.platform || "unknown",
     favorite_team_ids:
       favoriteTeamIds !== undefined
@@ -887,7 +893,7 @@ async function upsertMlbFavRow({
       .from(MLB_FAV_TABLE)
       .upsert(payload, { onConflict: "user_id" })
       .select(
-        "user_id,subscriber_id,push_token,platform,favorite_team_ids,updated_at",
+        "user_id,subscriber_id,push_token,live_activity_token,platform,favorite_team_ids,updated_at",
       )
       .maybeSingle();
 
@@ -1058,6 +1064,9 @@ function buildMlbLiveActivityProps(game, baseProps = null) {
   const previousPlayPitcherId = String(
     previousPlay?.matchup?.pitcher?.id ?? "",
   );
+  const awayTeamId = String(awayTeam?.id ?? awayEntry?.team?.id ?? "");
+  const homeTeamId = String(homeTeam?.id ?? homeEntry?.team?.id ?? "");
+  const offenseTeamId = String(linescore?.offense?.team?.id ?? "");
   const previousPlayMatchesCurrentMatchup =
     !!previousPlayDescription &&
     !!currentBatterId &&
@@ -1066,9 +1075,21 @@ function buildMlbLiveActivityProps(game, baseProps = null) {
     previousPlayPitcherId === currentPitcherId;
   const countIsReset = balls === 0 && strikes === 0;
   const inningEnded = outs >= 3;
+  const battingSideMismatch =
+    (linescore?.isTopInning === true &&
+      !!offenseTeamId &&
+      !!awayTeamId &&
+      offenseTeamId !== awayTeamId) ||
+    (linescore?.isTopInning === false &&
+      !!offenseTeamId &&
+      !!homeTeamId &&
+      offenseTeamId !== homeTeamId);
   const shouldShowPreviousPlay =
     !!previousPlayDescription &&
-    (previousPlayMatchesCurrentMatchup || countIsReset || inningEnded);
+    (previousPlayMatchesCurrentMatchup ||
+      battingSideMismatch ||
+      countIsReset ||
+      inningEnded);
   const matchupText =
     shouldShowPreviousPlay && previousPlayDescription
       ? previousPlayDescription
@@ -1129,6 +1150,7 @@ function buildMlbLiveActivityProps(game, baseProps = null) {
       batter,
       pitcher,
       previousPlayMatchesCurrentMatchup,
+      battingSideMismatch,
       countIsReset,
       inningEnded,
       matchupText,
@@ -5121,10 +5143,11 @@ app.get("/bb/team/:code", async (req, res) => {
 });
 
 // Live Activity token registration for MLB games
-app.post("/live-activity/register-activity-token", (req, res) => {
+app.post("/live-activity/register-activity-token", async (req, res) => {
   try {
-    const { gamePk, fixtureId, token } = req.body || {};
+    const { gamePk, fixtureId, token, userId, subscriberId } = req.body || {};
     const key = String(gamePk || fixtureId || "").trim();
+    const rowUserId = String(userId || subscriberId || "").trim();
 
     logMlbLiveActivity("register-token-start", {
       gamePk: gamePk || null,
@@ -5156,9 +5179,30 @@ app.post("/live-activity/register-activity-token", (req, res) => {
       liveActivityBaseProps.set(key, req.body.props);
     }
 
+    if (rowUserId) {
+      try {
+        const row = await upsertMlbFavRow({
+          userId: rowUserId,
+          subscriberId: String(subscriberId || rowUserId).trim(),
+          liveActivityToken: String(token),
+        });
+        logMlbLiveActivity("register-token-row-saved", {
+          userId: rowUserId,
+          subscriberId: row?.subscriberId || null,
+          hasLiveActivityToken: !!row?.liveActivityToken,
+        });
+      } catch (error) {
+        logMlbLiveActivity("register-token-row-save-error", {
+          userId: rowUserId,
+          error: error?.message || String(error),
+        });
+      }
+    }
+
     logMlbLiveActivity("register-token-done", {
       key,
       tokenCount: tokens.size,
+      rowUserId: rowUserId || null,
       hasProps: !!req.body?.props,
     });
 
