@@ -97,6 +97,13 @@ function logMlbLiveActivity(event, details = {}) {
   console.log(`[baseball live-activity] ${event}`, details);
 }
 
+function maskToken(token, visibleChars = 8) {
+  const value = String(token || "");
+  if (!value) return null;
+  if (value.length <= visibleChars) return value;
+  return `${value.slice(0, visibleChars)}…(${value.length})`;
+}
+
 function base64UrlEncode(input) {
   return Buffer.from(input)
     .toString("base64")
@@ -292,6 +299,11 @@ async function addPushToStartToken(bundleId, token) {
   const tokenKey = String(token || "").trim();
   if (!bundleKey || !tokenKey) return false;
 
+  logMlbLiveActivity("push-to-start:add-bundle-token", {
+    bundleId: bundleKey,
+    token: maskToken(tokenKey),
+  });
+
   let tokens = pushToStartTokens.get(bundleKey);
   if (!tokens) {
     tokens = new Set();
@@ -330,6 +342,12 @@ async function addPushToStartToken(bundleId, token) {
       );
     }
   }
+
+  logMlbLiveActivity("push-to-start:add-bundle-token-done", {
+    bundleId: bundleKey,
+    tokenCount: tokens.size,
+    hasSupabase: !!supabaseAdmin,
+  });
   return true;
 }
 
@@ -337,6 +355,11 @@ async function addFixturePushToStartToken(fixtureId, token) {
   const fixtureKey = String(fixtureId || "").trim();
   const tokenKey = String(token || "").trim();
   if (!fixtureKey || !tokenKey) return false;
+
+  logMlbLiveActivity("push-to-start:add-fixture-token", {
+    fixtureId: fixtureKey,
+    token: maskToken(tokenKey),
+  });
 
   let tokens = fixturePushToStartTokens.get(fixtureKey);
   if (!tokens) {
@@ -376,6 +399,12 @@ async function addFixturePushToStartToken(fixtureId, token) {
       );
     }
   }
+
+  logMlbLiveActivity("push-to-start:add-fixture-token-done", {
+    fixtureId: fixtureKey,
+    tokenCount: tokens.size,
+    hasSupabase: !!supabaseAdmin,
+  });
   return true;
 }
 
@@ -383,6 +412,11 @@ async function getPushToStartTokensForBundle(bundleId) {
   const bundleKey = String(bundleId || "").trim();
   if (!bundleKey) return [];
   const fallbackTokens = Array.from(pushToStartTokens.get(bundleKey) || []);
+  logMlbLiveActivity("push-to-start:get-bundle-tokens", {
+    bundleId: bundleKey,
+    fallbackCount: fallbackTokens.length,
+    hasSupabase: !!supabaseAdmin,
+  });
   if (supabaseAdmin) {
     try {
       const { data, error } = await supabaseAdmin
@@ -391,14 +425,16 @@ async function getPushToStartTokensForBundle(bundleId) {
         .eq("bundle_id", bundleKey)
         .eq("type", "bundle");
       if (!error) {
-        return Array.from(
-          new Set([
-            ...fallbackTokens,
-            ...(data || [])
-              .map((row) => String(row?.token || "").trim())
-              .filter(Boolean),
-          ]),
-        );
+        const dbTokens = (data || [])
+          .map((row) => String(row?.token || "").trim())
+          .filter(Boolean);
+        const merged = Array.from(new Set([...fallbackTokens, ...dbTokens]));
+        logMlbLiveActivity("push-to-start:get-bundle-tokens-done", {
+          bundleId: bundleKey,
+          dbCount: dbTokens.length,
+          mergedCount: merged.length,
+        });
+        return merged;
       }
     } catch (e) {
       console.warn(
@@ -416,6 +452,11 @@ async function getPushToStartTokensForFixture(fixtureId) {
   const fallbackTokens = Array.from(
     fixturePushToStartTokens.get(fixtureKey) || [],
   );
+  logMlbLiveActivity("push-to-start:get-fixture-tokens", {
+    fixtureId: fixtureKey,
+    fallbackCount: fallbackTokens.length,
+    hasSupabase: !!supabaseAdmin,
+  });
   if (supabaseAdmin) {
     try {
       const { data, error } = await supabaseAdmin
@@ -424,14 +465,16 @@ async function getPushToStartTokensForFixture(fixtureId) {
         .eq("fixture_id", fixtureKey)
         .eq("type", "fixture");
       if (!error) {
-        return Array.from(
-          new Set([
-            ...fallbackTokens,
-            ...(data || [])
-              .map((row) => String(row?.token || "").trim())
-              .filter(Boolean),
-          ]),
-        );
+        const dbTokens = (data || [])
+          .map((row) => String(row?.token || "").trim())
+          .filter(Boolean);
+        const merged = Array.from(new Set([...fallbackTokens, ...dbTokens]));
+        logMlbLiveActivity("push-to-start:get-fixture-tokens-done", {
+          fixtureId: fixtureKey,
+          dbCount: dbTokens.length,
+          mergedCount: merged.length,
+        });
+        return merged;
       }
     } catch (e) {
       console.warn(
@@ -446,7 +489,12 @@ async function getPushToStartTokensForFixture(fixtureId) {
 function getLiveActivityTokensForGame(gamePk) {
   const key = String(gamePk || "").trim();
   if (!key) return [];
-  return Array.from(liveActivityTokens.get(key) || []);
+  const tokens = Array.from(liveActivityTokens.get(key) || []);
+  logMlbLiveActivity("activity-token:get", {
+    gamePk: key,
+    tokenCount: tokens.length,
+  });
+  return tokens;
 }
 
 function formatStartingAt(dateTime) {
@@ -5084,6 +5132,14 @@ app.post("/live-activity/register-activity-token", (req, res) => {
         .json({ error: "gamePk/fixtureId and token required" });
     }
 
+    logMlbLiveActivity("register-activity-token:incoming", {
+      gamePk: gamePk || null,
+      fixtureId: fixtureId || null,
+      key,
+      token: maskToken(token),
+      existingCount: (liveActivityTokens.get(key) || new Set()).size,
+    });
+
     const tokens = liveActivityTokens.get(key) || new Set();
     tokens.add(String(token));
     liveActivityTokens.set(key, tokens);
@@ -5094,6 +5150,7 @@ app.post("/live-activity/register-activity-token", (req, res) => {
     logMlbLiveActivity("register-token-done", {
       key,
       tokenCount: tokens.size,
+      hasProps: !!req.body?.props,
     });
 
     return res.json({ ok: true, tokenCount: tokens.size });
@@ -5111,6 +5168,19 @@ app.post("/live-activity/register-push-to-start", (req, res) => {
     if (!bundleId || !token) {
       return res.status(400).json({ error: "bundleId and token required" });
     }
+
+    logMlbLiveActivity("register-push-to-start:incoming", {
+      bundleId: String(bundleId),
+      fixtureId: fixtureId || null,
+      token: maskToken(token),
+      bundleTokenCount: (
+        pushToStartTokens.get(String(bundleId).trim()) || new Set()
+      ).size,
+      fixtureTokenCount: fixtureId
+        ? (fixturePushToStartTokens.get(String(fixtureId).trim()) || new Set())
+            .size
+        : 0,
+    });
 
     Promise.resolve(addPushToStartToken(bundleId, token)).catch(() => {});
     if (fixtureId) {
@@ -5143,6 +5213,14 @@ app.post("/live-activity/start", async (req, res) => {
       return res.status(400).json({ error: "gamePk or fixtureId required" });
     }
 
+    logMlbLiveActivity("start:request", {
+      gamePk: gamePk || null,
+      fixtureId: fixtureId || null,
+      bundleId: bundleId || APPLE_BUNDLE_ID,
+      hasProps: !!props,
+      propGamePk: props?.gamePk || null,
+    });
+
     const payload =
       props && typeof props === "object"
         ? props
@@ -5158,6 +5236,14 @@ app.post("/live-activity/start", async (req, res) => {
     if (!payload) {
       return res.status(404).json({ error: "Game not found" });
     }
+
+    const currentFixtureTokens = await getPushToStartTokensForFixture(key);
+    logMlbLiveActivity("start:token-check", {
+      key,
+      tokenCount: currentFixtureTokens.length,
+      fixtureId: fixtureId || null,
+      bundleId: bundleId || APPLE_BUNDLE_ID,
+    });
 
     const result = await pushMlbLiveActivityStart({
       fixtureId: key,
@@ -5189,6 +5275,11 @@ app.post("/live-activity/update", async (req, res) => {
     if (!key) {
       return res.status(400).json({ error: "gamePk or fixtureId required" });
     }
+
+    logMlbLiveActivity("update:request", {
+      gamePk: gamePk || null,
+      fixtureId: fixtureId || null,
+    });
 
     const game = await fetchMlbGameForLiveActivity(key);
     if (!game) {
