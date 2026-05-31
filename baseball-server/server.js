@@ -1329,10 +1329,8 @@ function buildMlbLiveActivityEndPayload(props) {
       "attributes-type": "LiveActivityAttributes",
       attributes: {},
       "dismissal-date": dismissalDate.toISOString(),
-      "content-state": {
-        name: "FootballLiveActivity",
-        props: typeof props === "string" ? props : JSON.stringify(props || {}),
-      },
+      "content-state":
+        typeof props === "string" ? JSON.parse(props) : { ...(props || {}) },
     },
   };
 }
@@ -1405,10 +1403,7 @@ async function pushMlbLiveActivityUpdate(game) {
   const payload = {
     aps: {
       event: "update",
-      "content-state": {
-        name: "FootballLiveActivity",
-        props: JSON.stringify(nextProps),
-      },
+      "content-state": { ...nextProps },
       timestamp: Math.floor(Date.now() / 1000),
       ...(alert ? { alert } : {}),
     },
@@ -1457,11 +1452,10 @@ async function pushMlbLiveActivityStart({ fixtureId, bundleId, payload }) {
         body: "",
         sound: "default",
       },
-      "content-state": {
-        name: "FootballLiveActivity",
-        props:
-          typeof payload === "string" ? payload : JSON.stringify(payload || {}),
-      },
+      "content-state":
+        typeof payload === "string"
+          ? JSON.parse(payload)
+          : { ...(payload || {}) },
     },
   };
 
