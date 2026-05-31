@@ -101,6 +101,86 @@ function logMlbLiveActivity(event, details = {}) {
   console.log(`[baseball live-activity] ${event}`, details);
 }
 
+function safeJsonStringify(value) {
+  try {
+    return JSON.stringify(value);
+  } catch (error) {
+    return JSON.stringify({ error: error?.message || String(error) });
+  }
+}
+
+function serializeLiveActivityProps(payload) {
+  if (typeof payload === "string") {
+    const trimmed = payload.trim();
+    if (!trimmed) return "{}";
+    try {
+      return JSON.stringify(JSON.parse(trimmed));
+    } catch {
+      return JSON.stringify({ raw: trimmed });
+    }
+  }
+
+  return safeJsonStringify(payload || {});
+}
+
+function buildLiveActivityContentState(payload) {
+  return {
+    name: "FootballLiveActivity",
+    props: serializeLiveActivityProps(payload),
+  };
+}
+
+function summarizeLiveActivityPayload(payload) {
+  const nextProps =
+    typeof payload === "string"
+      ? (() => {
+          try {
+            return JSON.parse(payload);
+          } catch {
+            return { raw: payload };
+          }
+        })()
+      : payload || {};
+
+  return {
+    gamePk: nextProps?.gamePk ?? null,
+    id: nextProps?.id ?? null,
+    status: {
+      short_name: nextProps?.status?.short_name ?? null,
+      text: nextProps?.status?.text ?? null,
+      inning: nextProps?.status?.inning ?? null,
+      currentInningOrdinal: nextProps?.status?.currentInningOrdinal ?? null,
+      inningState: nextProps?.status?.inningState ?? null,
+      balls: nextProps?.status?.balls ?? null,
+      strikes: nextProps?.status?.strikes ?? null,
+      outs: nextProps?.status?.outs ?? null,
+      matchupText: nextProps?.status?.matchupText ?? null,
+      previousPlayDescription:
+        nextProps?.status?.previousPlayDescription ?? null,
+      offenseTeamId: nextProps?.status?.offenseTeamId ?? null,
+      defenseTeamId: nextProps?.status?.defenseTeamId ?? null,
+      ticking: nextProps?.status?.ticking ?? null,
+    },
+    home: {
+      name: nextProps?.home?.name ?? null,
+      score: nextProps?.home?.score ?? null,
+      shortName: nextProps?.home?.shortName ?? null,
+    },
+    away: {
+      name: nextProps?.away?.name ?? null,
+      score: nextProps?.away?.score ?? null,
+      shortName: nextProps?.away?.shortName ?? null,
+    },
+    colors: nextProps?.colors ?? null,
+    venue: nextProps?.venue?.name ?? null,
+    url: nextProps?.url ?? null,
+    startingAt: nextProps?.startingAt ?? null,
+    previousPlayDescription: nextProps?.previousPlayDescription ?? null,
+    previousPlayMatchup: nextProps?.previousPlayMatchup ?? null,
+    linescoreTeamIds: nextProps?.linescoreTeamIds ?? null,
+  };
+}
+
 function maskToken(token, visibleChars = 8) {
   const value = String(token || "");
   if (!value) return null;
@@ -167,6 +247,20 @@ async function sendToAPNs(deviceToken, payload, opts = {}) {
   while (attempt < maxAttempts) {
     attempt += 1;
     try {
+      const contentState = payload?.aps?.["content-state"] || null;
+      const priority = String(opts.priority ?? 10);
+      logMlbLiveActivity("apns-request", {
+        deviceToken: String(deviceToken || "").slice(0, 8),
+        attempt,
+        event: payload?.aps?.event || null,
+        topic: APNS_TOPIC,
+        hasAlert: !!payload?.aps?.alert,
+        contentStateName: contentState?.name || null,
+        contentStatePropsLength: String(contentState?.props || "").length,
+        timestamp: payload?.aps?.timestamp ?? null,
+        priority,
+      });
+
       const client = http2.connect("https://api.push.apple.com");
       logMlbLiveActivity("apns-connect", {
         deviceToken: String(deviceToken || "").slice(0, 8),
@@ -186,6 +280,7 @@ async function sendToAPNs(deviceToken, payload, opts = {}) {
           authorization: `bearer ${jwtToken}`,
           "apns-topic": APNS_TOPIC,
           "apns-push-type": "liveactivity",
+          "apns-priority": priority,
           "content-type": "application/json",
         });
 
@@ -247,6 +342,15 @@ async function sendToAPNs(deviceToken, payload, opts = {}) {
 async function forwardToProvider(tokenOrTokens, payload) {
   const tokens = Array.isArray(tokenOrTokens) ? tokenOrTokens : [tokenOrTokens];
   const results = [];
+  const contentState = payload?.aps?.["content-state"] || null;
+
+  logMlbLiveActivity("provider-forward:start", {
+    tokenCount: tokens.length,
+    event: payload?.aps?.event || null,
+    contentStateName: contentState?.name || null,
+    contentStatePropsLength: String(contentState?.props || "").length,
+    hasAlert: !!payload?.aps?.alert,
+  });
 
   for (const token of tokens) {
     if (APNS_PROVIDER_URL) {
@@ -256,6 +360,7 @@ async function forwardToProvider(tokenOrTokens, payload) {
         logMlbLiveActivity("provider-forward", {
           token: String(token || "").slice(0, 8),
           target: APNS_PROVIDER_URL,
+          event: payload?.aps?.event || null,
         });
         const resp = await axios.post(
           APNS_PROVIDER_URL,
@@ -279,6 +384,14 @@ async function forwardToProvider(tokenOrTokens, payload) {
       results.push({ token, forwarded: false, error: String(e) });
     }
   }
+
+  logMlbLiveActivity("provider-forward:done", {
+    tokenCount: tokens.length,
+    forwardedCount: results.filter((entry) => entry?.forwarded).length,
+    apnsCount: results.filter((entry) => entry?.apns).length,
+    errorCount: results.filter((entry) => entry?.error).length,
+    event: payload?.aps?.event || null,
+  });
 
   return results.length === 1 ? results[0] : results;
 }
@@ -1197,7 +1310,6 @@ function buildMlbLiveActivityProps(game, baseProps = null) {
       batter,
       pitcher,
       matchupText,
-      matchupText,
       bases,
       previousPlayDescription: previousPlayData.description,
       previousPlayBatterId: previousPlayData.matchup.batter.id,
@@ -1207,7 +1319,6 @@ function buildMlbLiveActivityProps(game, baseProps = null) {
       ticking: effectiveStatusCode === "I" || effectiveStatusCode === "M",
     },
     bases,
-    previousPlay: previousPlayData,
     previousPlay: previousPlayData.raw,
     previousPlayDescription: previousPlayData.description,
     previousPlayMatchup: previousPlayData.matchup,
@@ -1329,8 +1440,7 @@ function buildMlbLiveActivityEndPayload(props) {
       "attributes-type": "LiveActivityAttributes",
       attributes: {},
       "dismissal-date": dismissalDate.toISOString(),
-      "content-state":
-        typeof props === "string" ? JSON.parse(props) : { ...(props || {}) },
+      "content-state": buildLiveActivityContentState(props),
     },
   };
 }
@@ -1403,11 +1513,19 @@ async function pushMlbLiveActivityUpdate(game) {
   const payload = {
     aps: {
       event: "update",
-      "content-state": { ...nextProps },
+      "content-state": buildLiveActivityContentState(nextProps),
       timestamp: Math.floor(Date.now() / 1000),
       ...(alert ? { alert } : {}),
     },
   };
+
+  logMlbLiveActivity("update:payload", {
+    gamePk,
+    tokenCount: tokens.length,
+    payloadSummary: summarizeLiveActivityPayload(nextProps),
+    contentState: payload.aps["content-state"],
+    alert,
+  });
 
   const forwarded = await forwardToProvider(tokens, payload);
   if (isMlbLiveActivityFinished(game) && !gameState.didSendDismissalEnd) {
@@ -1438,6 +1556,12 @@ async function pushMlbLiveActivityStart({ fixtureId, bundleId, payload }) {
   const tokens = Array.from(new Set([...fixtureTokens, ...bundleTokens]));
 
   if (tokens.length === 0) {
+    logMlbLiveActivity("start:no-push-to-start-tokens", {
+      fixtureId: fixtureKey || null,
+      bundleId: bundleKey || null,
+      fixtureTokenCount: fixtureTokens.length,
+      bundleTokenCount: bundleTokens.length,
+    });
     return { sent: false, reason: "no-push-to-start-tokens", tokenCount: 0 };
   }
 
@@ -1447,21 +1571,32 @@ async function pushMlbLiveActivityStart({ fixtureId, bundleId, payload }) {
       timestamp: Math.floor(Date.now() / 1000),
       "attributes-type": "LiveActivityAttributes",
       attributes: {},
+      "input-push-token": 1,
       alert: {
         title: "",
         body: "",
         sound: "default",
       },
-      "content-state":
-        typeof payload === "string"
-          ? JSON.parse(payload)
-          : { ...(payload || {}) },
+      "content-state": buildLiveActivityContentState(payload),
     },
   };
 
   if (fixtureKey && payload) {
     liveActivityBaseProps.set(fixtureKey, payload);
   }
+
+  logMlbLiveActivity("start:payload", {
+    fixtureId: fixtureKey || null,
+    bundleId: bundleKey || null,
+    fixtureTokenCount: fixtureTokens.length,
+    bundleTokenCount: bundleTokens.length,
+    tokenCount: tokens.length,
+    payloadSummary: summarizeLiveActivityPayload(payload),
+    contentState: startPayload.aps["content-state"],
+    contentStatePropsLength: String(
+      startPayload.aps["content-state"]?.props || "",
+    ).length,
+  });
 
   const forwarded = await forwardToProvider(tokens, startPayload);
   const hasForwardError = Array.isArray(forwarded)
@@ -5314,6 +5449,12 @@ app.post("/live-activity/start", async (req, res) => {
       hasProps: !!props,
       propGamePk: props?.gamePk || null,
     });
+    logMlbLiveActivity("start:request-body", {
+      key,
+      payloadSummary: summarizeLiveActivityPayload(props),
+      propsType: props ? typeof props : null,
+      propsJsonLength: serializeLiveActivityProps(props).length,
+    });
 
     const payload =
       props && typeof props === "object"
@@ -5347,6 +5488,12 @@ app.post("/live-activity/start", async (req, res) => {
       bundleTokenCount: currentBundleTokens.length,
       fixtureId: fixtureId || null,
       bundleId: bundleId || APPLE_BUNDLE_ID,
+    });
+    logMlbLiveActivity("start:payload-summary", {
+      key,
+      payloadSummary: summarizeLiveActivityPayload(payload),
+      contentState: buildLiveActivityContentState(payload),
+      propsJsonLength: serializeLiveActivityProps(payload).length,
     });
 
     const result = await pushMlbLiveActivityStart({
