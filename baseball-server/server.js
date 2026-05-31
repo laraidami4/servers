@@ -95,7 +95,7 @@ const MLB_LIVE_ACTIVITY_POLL_MS = 5000;
 const MLB_LIVE_ACTIVITY_DISMISSAL_MS = 60 * 60 * 1000;
 const MLB_LIVE_ACTIVITY_HYDRATE = "linescore,previousPlay";
 const MLB_LIVE_ACTIVITY_FIELDS =
-  "dates,games,gamePk,gameType,gameDate,status,codedGameState,detailedState,teams,away,team,id,name,score,isWinner,home,linescore,currentInning,currentInningOrdinal,isTopInning,defense,pitcher,id,fullName,offense,batter,first,second,third,balls,strikes,outs,venue,previousPlay,result,description,matchup";
+  "dates,games,gamePk,gameType,gameDate,status,codedGameState,detailedState,teams,away,team,id,name,score,isWinner,home,linescore,currentInning,currentInningOrdinal,isTopInning,defense,team,id,name,pitcher,id,fullName,offense,team,id,name,batter,id,fullName,first,second,third,balls,strikes,outs,venue,previousPlay,result,description,matchup";
 
 function logMlbLiveActivity(event, details = {}) {
   console.log(`[baseball live-activity] ${event}`, details);
@@ -567,73 +567,29 @@ function blendHexColors(firstColor, secondColor) {
   }
 }
 
-function getMlbLiveActivityMatchupText(game, baseProps = null) {
-  const linescore =
-    game?.linescore || game?.liveData?.linescore || game?.live?.linescore || {};
+function getMlbLiveActivityPreviousPlayData(game) {
   const previousPlay =
     game?.previousPlay || game?.liveData?.plays?.currentPlay || null;
-
-  const batter =
-    linescore?.offense?.batter?.fullName ?? baseProps?.status?.batter ?? null;
-  const pitcher =
-    linescore?.defense?.pitcher?.fullName ?? baseProps?.status?.pitcher ?? null;
-  const currentBatterId = String(linescore?.offense?.batter?.id || "").trim();
-  const currentPitcherId = String(linescore?.defense?.pitcher?.id || "").trim();
-  const previousBatterId = String(
-    previousPlay?.matchup?.batter?.id || "",
-  ).trim();
-  const previousPitcherId = String(
-    previousPlay?.matchup?.pitcher?.id || "",
-  ).trim();
-  const previousDescription = String(
-    previousPlay?.result?.description || "",
-  ).trim();
-  const offenseTeamId = String(linescore?.offense?.team?.id || "").trim();
-  const homeTeamId = String(
-    game?.teams?.home?.team?.id || game?.gameData?.teams?.home?.id || "",
-  ).trim();
-  const awayTeamId = String(
-    game?.teams?.away?.team?.id || game?.gameData?.teams?.away?.id || "",
-  ).trim();
-  const isTopInning = linescore?.isTopInning === true;
-  const balls = Number(linescore?.balls ?? baseProps?.status?.balls ?? 0);
-  const strikes = Number(linescore?.strikes ?? baseProps?.status?.strikes ?? 0);
-
-  const idsMatch =
-    !!previousDescription &&
-    !!currentBatterId &&
-    !!currentPitcherId &&
-    currentBatterId === previousBatterId &&
-    currentPitcherId === previousPitcherId;
-  const specialUseDescription =
-    !!previousDescription &&
-    ((balls === 0 && strikes === 0) ||
-      (isTopInning &&
-        offenseTeamId &&
-        homeTeamId &&
-        offenseTeamId === homeTeamId) ||
-      (!isTopInning &&
-        offenseTeamId &&
-        awayTeamId &&
-        offenseTeamId === awayTeamId));
-
-  if (previousDescription && (idsMatch || specialUseDescription)) {
-    return {
-      matchupText: previousDescription,
-      shouldUsePreviousPlayDescription: true,
-    };
-  }
-
-  if (batter && pitcher) {
-    return {
-      matchupText: `${batter} (B.) vs ${pitcher} (P.)`,
-      shouldUsePreviousPlayDescription: false,
-    };
-  }
+  const linescore =
+    game?.linescore || game?.liveData?.linescore || game?.live?.linescore || {};
 
   return {
-    matchupText: batter || pitcher || null,
-    shouldUsePreviousPlayDescription: false,
+    raw: previousPlay,
+    description: String(previousPlay?.result?.description || "").trim() || null,
+    matchup: {
+      batter: {
+        id: previousPlay?.matchup?.batter?.id ?? null,
+        fullName: previousPlay?.matchup?.batter?.fullName ?? null,
+      },
+      pitcher: {
+        id: previousPlay?.matchup?.pitcher?.id ?? null,
+        fullName: previousPlay?.matchup?.pitcher?.fullName ?? null,
+      },
+    },
+    teamIds: {
+      offense: linescore?.offense?.team?.id ?? null,
+      defense: linescore?.defense?.team?.id ?? null,
+    },
   };
 }
 
@@ -1121,6 +1077,9 @@ function buildMlbLiveActivityProps(game, baseProps = null) {
   );
   const awayWinner = awayEntry?.isWinner ?? awayTeam?.isWinner ?? false;
   const homeWinner = homeEntry?.isWinner ?? homeTeam?.isWinner ?? false;
+  const previousPlayData = getMlbLiveActivityPreviousPlayData(game);
+  const offenseTeamId = previousPlayData.teamIds.offense;
+  const defenseTeamId = previousPlayData.teamIds.defense;
   const bases = {
     first: !!linescore?.offense?.first,
     second: !!linescore?.offense?.second,
@@ -1133,7 +1092,6 @@ function buildMlbLiveActivityProps(game, baseProps = null) {
     linescore?.offense?.batter?.fullName ?? baseProps?.status?.batter ?? null;
   const pitcher =
     linescore?.defense?.pitcher?.fullName ?? baseProps?.status?.pitcher ?? null;
-  const matchupInfo = getMlbLiveActivityMatchupText(game, baseProps);
   const currentInningOrdinal = String(
     linescore?.currentInningOrdinal ||
       baseProps?.status?.currentInningOrdinal ||
@@ -1188,11 +1146,21 @@ function buildMlbLiveActivityProps(game, baseProps = null) {
       batter,
       pitcher,
       bases,
-      matchupText: matchupInfo.matchupText,
+      previousPlayDescription: previousPlayData.description,
+      previousPlayBatterId: previousPlayData.matchup.batter.id,
+      previousPlayPitcherId: previousPlayData.matchup.pitcher.id,
+      offenseTeamId,
+      defenseTeamId,
       ticking: effectiveStatusCode === "I" || effectiveStatusCode === "M",
     },
     bases,
-    matchupText: matchupInfo.matchupText,
+    previousPlay: previousPlayData,
+    previousPlay: previousPlayData.raw,
+    previousPlayDescription: previousPlayData.description,
+    previousPlayMatchup: previousPlayData.matchup,
+    linescoreTeamIds: previousPlayData.teamIds,
+    linescoreOffenseTeamId: offenseTeamId,
+    linescoreDefenseTeamId: defenseTeamId,
     home: {
       ...baseHome,
       name: homeTeam?.name || "Home",
@@ -1250,8 +1218,7 @@ function buildMlbLiveActivitySignature(game) {
     game?.linescore || game?.liveData?.linescore || game?.live?.linescore || {};
   const awayEntry = game?.teams?.away || {};
   const homeEntry = game?.teams?.home || {};
-  const previousPlay =
-    game?.previousPlay || game?.liveData?.plays?.currentPlay || null;
+  const previousPlayData = getMlbLiveActivityPreviousPlayData(game);
   return [
     String(game?.status?.codedGameState || game?.status?.statusCode || ""),
     String(game?.status?.detailedState || game?.status?.status || ""),
@@ -1274,9 +1241,11 @@ function buildMlbLiveActivitySignature(game) {
     String(linescore?.offense?.third ? 1 : 0),
     String(linescore?.offense?.batter?.fullName || ""),
     String(linescore?.defense?.pitcher?.fullName || ""),
-    String(previousPlay?.result?.description || ""),
-    String(previousPlay?.matchup?.batter?.id || ""),
-    String(previousPlay?.matchup?.pitcher?.id || ""),
+    String(previousPlayData.description || ""),
+    String(previousPlayData.matchup.batter.id ?? ""),
+    String(previousPlayData.matchup.pitcher.id ?? ""),
+    String(previousPlayData.teamIds.offense ?? ""),
+    String(previousPlayData.teamIds.defense ?? ""),
   ].join("|");
 }
 
@@ -1474,57 +1443,17 @@ async function fetchMlbGameForLiveActivity(gamePk) {
   const key = String(gamePk || "").trim();
   if (!key) return null;
 
-  const url = `${BASE_URL}v1/schedule/games/?sportId=1&gamePk=${encodeURIComponent(key)}&hydrate=${encodeURIComponent(MLB_LIVE_ACTIVITY_HYDRATE)}&fields=${encodeURIComponent(MLB_LIVE_ACTIVITY_FIELDS)}`;
+  const path = `v1/schedule/games/?sportId=1&gamePk=${encodeURIComponent(key)}&hydrate=${encodeURIComponent(MLB_LIVE_ACTIVITY_HYDRATE)}&fields=${encodeURIComponent(MLB_LIVE_ACTIVITY_FIELDS)}`;
+  const url = `${BASE_URL}${path}`;
   logMlbLiveActivity("fetch-start", { gamePk: key, url });
   const res = await axios.get(url, { timeout: 10000 });
   const raw = res.data || {};
-  const gameData = raw.gameData || {};
-  const liveData = raw.liveData || raw.live || {};
-  const linescore = liveData?.linescore || raw.linescore || null;
-  const awaySource = raw.teams?.away ?? gameData?.teams?.away ?? null;
-  const homeSource = raw.teams?.home ?? gameData?.teams?.home ?? null;
-  const game = {
-    gamePk: raw.gamePk ?? Number(key),
-    gameType:
-      raw.gameType ?? gameData?.game?.type ?? gameData?.gameType ?? null,
-    gameDate:
-      raw.gameDate ??
-      gameData?.datetime?.dateTime ??
-      gameData?.game?.dateTime ??
-      null,
-    status: raw.status || gameData?.status || null,
-    venue: raw.venue || gameData?.venue || null,
-    teams: {
-      away: awaySource
-        ? {
-            team: awaySource?.team || awaySource,
-            score:
-              awaySource?.score ??
-              linescore?.teams?.away?.runs ??
-              gameData?.teams?.away?.score ??
-              0,
-            isWinner:
-              awaySource?.isWinner ?? gameData?.teams?.away?.isWinner ?? false,
-          }
-        : null,
-      home: homeSource
-        ? {
-            team: homeSource?.team || homeSource,
-            score:
-              homeSource?.score ??
-              linescore?.teams?.home?.runs ??
-              gameData?.teams?.home?.score ??
-              0,
-            isWinner:
-              homeSource?.isWinner ?? gameData?.teams?.home?.isWinner ?? false,
-          }
-        : null,
-    },
-    linescore,
-    previousPlay: raw.previousPlay || liveData?.plays?.currentPlay || null,
-    liveData,
-    gameData,
-  };
+  const games = Array.isArray(raw?.dates)
+    ? raw.dates.flatMap((date) => date?.games ?? [])
+    : [];
+  const game =
+    games.find((entry) => String(entry?.gamePk) === String(key)) ?? null;
+  const linescore = game?.linescore ?? null;
   logMlbLiveActivity("fetch-done", {
     gamePk: key,
     found: !!game,
