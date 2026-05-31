@@ -89,6 +89,7 @@ const pushToStartTokens = new Map();
 const fixturePushToStartTokens = new Map();
 // live-activity instance tokens keyed by gamePk / fixtureId
 const liveActivityTokens = new Map();
+const liveActivityTokenOwners = new Map();
 const liveActivityBaseProps = new Map();
 const MLB_LIVE_ACTIVITY_POLL_MS = 5000;
 const MLB_LIVE_ACTIVITY_DISMISSAL_MS = 60 * 60 * 1000;
@@ -283,6 +284,21 @@ function removeLiveActivityToken(token) {
   const key = String(token || "").trim();
   if (!key) return;
 
+  const owner = liveActivityTokenOwners.get(key) || null;
+  if (owner) {
+    const ownerKey = String(owner || "").trim();
+    const tokens = liveActivityTokens.get(ownerKey) || new Set();
+    if (tokens.has(key)) {
+      tokens.delete(key);
+      if (tokens.size === 0) {
+        liveActivityTokens.delete(ownerKey);
+      } else {
+        liveActivityTokens.set(ownerKey, tokens);
+      }
+    }
+    liveActivityTokenOwners.delete(key);
+  }
+
   for (const [gamePk, tokens] of liveActivityTokens.entries()) {
     if (!tokens.has(key)) continue;
     tokens.delete(key);
@@ -449,9 +465,7 @@ async function getPushToStartTokensForBundle(bundleId) {
 async function getPushToStartTokensForFixture(fixtureId) {
   const fixtureKey = String(fixtureId || "").trim();
   if (!fixtureKey) return [];
-  const fallbackTokens = Array.from(
-    fixturePushToStartTokens.get(fixtureKey) || [],
-  );
+  const fallbackTokens = Array.from(fixturePushToStartTokens.get(fixtureKey) || []);
   logMlbLiveActivity("push-to-start:get-fixture-tokens", {
     fixtureId: fixtureKey,
     fallbackCount: fallbackTokens.length,
@@ -1056,16 +1070,14 @@ function buildMlbLiveActivityProps(game, baseProps = null) {
       "",
   );
   const inning = String(
-    linescore?.currentInning ??
-      baseProps?.status?.inning ??
-      (effectiveStatusCode === "F" ? 9 : null),
+    linescore?.currentInning ?? baseProps?.status?.inning ?? (effectiveStatusCode === "F" ? 9 : null),
   );
   const inningState =
     linescore?.isTopInning === true
       ? "Top"
       : linescore?.isTopInning === false
         ? "Bottom"
-        : (baseProps?.status?.inningState ?? null);
+        : baseProps?.status?.inningState ?? null;
   const detailedState = String(
     status?.detailedState || status?.status || baseProps?.status?.text || "",
   );
@@ -5116,6 +5128,7 @@ app.post("/live-activity/register-activity-token", (req, res) => {
   try {
     const { gamePk, fixtureId, token } = req.body || {};
     const key = String(gamePk || fixtureId || "").trim();
+    const tokenKey = String(token || "").trim();
 
     logMlbLiveActivity("register-token-start", {
       gamePk: gamePk || null,
@@ -5132,28 +5145,32 @@ app.post("/live-activity/register-activity-token", (req, res) => {
         .json({ error: "gamePk/fixtureId and token required" });
     }
 
+    const previousOwner = liveActivityTokenOwners.get(tokenKey) || null;
+    if (previousOwner && previousOwner !== key) {
+      liveActivityTokens.delete(previousOwner);
+    }
+
     logMlbLiveActivity("register-activity-token:incoming", {
       gamePk: gamePk || null,
       fixtureId: fixtureId || null,
       key,
-      token: maskToken(token),
+      token: maskToken(tokenKey),
       existingCount: (liveActivityTokens.get(key) || new Set()).size,
     });
 
-    const tokens = liveActivityTokens.get(key) || new Set();
-    tokens.add(String(token));
-    liveActivityTokens.set(key, tokens);
+    liveActivityTokens.set(key, new Set([tokenKey]));
+    liveActivityTokenOwners.set(tokenKey, key);
     if (req.body?.props) {
       liveActivityBaseProps.set(key, req.body.props);
     }
 
     logMlbLiveActivity("register-token-done", {
       key,
-      tokenCount: tokens.size,
+      tokenCount: 1,
       hasProps: !!req.body?.props,
     });
 
-    return res.json({ ok: true, tokenCount: tokens.size });
+    return res.json({ ok: true, tokenCount: 1 });
   } catch (err) {
     logMlbLiveActivity("register-token-error", {
       error: err?.message || String(err),
@@ -5173,12 +5190,9 @@ app.post("/live-activity/register-push-to-start", (req, res) => {
       bundleId: String(bundleId),
       fixtureId: fixtureId || null,
       token: maskToken(token),
-      bundleTokenCount: (
-        pushToStartTokens.get(String(bundleId).trim()) || new Set()
-      ).size,
+      bundleTokenCount: (pushToStartTokens.get(String(bundleId).trim()) || new Set()).size,
       fixtureTokenCount: fixtureId
-        ? (fixturePushToStartTokens.get(String(fixtureId).trim()) || new Set())
-            .size
+        ? (fixturePushToStartTokens.get(String(fixtureId).trim()) || new Set()).size
         : 0,
     });
 
