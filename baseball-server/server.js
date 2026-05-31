@@ -1248,15 +1248,7 @@ function buildMlbLiveActivityProps(game, baseProps = null) {
     second: !!offenseBaseState?.second,
     third: !!offenseBaseState?.third,
   };
-  const previousBases = baseProps?.bases || baseProps?.status?.bases || null;
-  const hasCurrentBaseFields = ["first", "second", "third"].some((base) =>
-    Object.prototype.hasOwnProperty.call(offenseBaseState || {}, base),
-  );
-  const bases = hasCurrentBaseFields
-    ? currentBases
-    : previousBases && typeof previousBases === "object"
-      ? previousBases
-      : currentBases;
+  const bases = currentBases;
   const balls = Number(linescore?.balls ?? baseProps?.status?.balls ?? 0);
   const strikes = Number(linescore?.strikes ?? baseProps?.status?.strikes ?? 0);
   const outs = Number(linescore?.outs ?? baseProps?.status?.outs ?? 0);
