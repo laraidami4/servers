@@ -93,6 +93,9 @@ const liveActivityTokenOwners = new Map();
 const liveActivityBaseProps = new Map();
 const MLB_LIVE_ACTIVITY_POLL_MS = 5000;
 const MLB_LIVE_ACTIVITY_DISMISSAL_MS = 60 * 60 * 1000;
+const MLB_LIVE_ACTIVITY_HYDRATE = "linescore,previousPlay";
+const MLB_LIVE_ACTIVITY_FIELDS =
+  "dates,games,gamePk,gameType,gameDate,status,codedGameState,detailedState,teams,away,team,id,name,score,isWinner,home,linescore,currentInning,currentInningOrdinal,isTopInning,defense,pitcher,id,fullName,offense,batter,first,second,third,balls,strikes,outs,venue,previousPlay,result,description,matchup";
 
 function logMlbLiveActivity(event, details = {}) {
   console.log(`[baseball live-activity] ${event}`, details);
@@ -465,7 +468,9 @@ async function getPushToStartTokensForBundle(bundleId) {
 async function getPushToStartTokensForFixture(fixtureId) {
   const fixtureKey = String(fixtureId || "").trim();
   if (!fixtureKey) return [];
-  const fallbackTokens = Array.from(fixturePushToStartTokens.get(fixtureKey) || []);
+  const fallbackTokens = Array.from(
+    fixturePushToStartTokens.get(fixtureKey) || [],
+  );
   logMlbLiveActivity("push-to-start:get-fixture-tokens", {
     fixtureId: fixtureKey,
     fallbackCount: fallbackTokens.length,
@@ -504,10 +509,6 @@ function getLiveActivityTokensForGame(gamePk) {
   const key = String(gamePk || "").trim();
   if (!key) return [];
   const tokens = Array.from(liveActivityTokens.get(key) || []);
-  logMlbLiveActivity("activity-token:get", {
-    gamePk: key,
-    tokenCount: tokens.length,
-  });
   return tokens;
 }
 
@@ -564,6 +565,76 @@ function blendHexColors(firstColor, secondColor) {
   } catch {
     return firstColor || secondColor || null;
   }
+}
+
+function getMlbLiveActivityMatchupText(game, baseProps = null) {
+  const linescore =
+    game?.linescore || game?.liveData?.linescore || game?.live?.linescore || {};
+  const previousPlay =
+    game?.previousPlay || game?.liveData?.plays?.currentPlay || null;
+
+  const batter =
+    linescore?.offense?.batter?.fullName ?? baseProps?.status?.batter ?? null;
+  const pitcher =
+    linescore?.defense?.pitcher?.fullName ?? baseProps?.status?.pitcher ?? null;
+  const currentBatterId = String(linescore?.offense?.batter?.id || "").trim();
+  const currentPitcherId = String(linescore?.defense?.pitcher?.id || "").trim();
+  const previousBatterId = String(
+    previousPlay?.matchup?.batter?.id || "",
+  ).trim();
+  const previousPitcherId = String(
+    previousPlay?.matchup?.pitcher?.id || "",
+  ).trim();
+  const previousDescription = String(
+    previousPlay?.result?.description || "",
+  ).trim();
+  const offenseTeamId = String(linescore?.offense?.team?.id || "").trim();
+  const homeTeamId = String(
+    game?.teams?.home?.team?.id || game?.gameData?.teams?.home?.id || "",
+  ).trim();
+  const awayTeamId = String(
+    game?.teams?.away?.team?.id || game?.gameData?.teams?.away?.id || "",
+  ).trim();
+  const isTopInning = linescore?.isTopInning === true;
+  const balls = Number(linescore?.balls ?? baseProps?.status?.balls ?? 0);
+  const strikes = Number(linescore?.strikes ?? baseProps?.status?.strikes ?? 0);
+
+  const idsMatch =
+    !!previousDescription &&
+    !!currentBatterId &&
+    !!currentPitcherId &&
+    currentBatterId === previousBatterId &&
+    currentPitcherId === previousPitcherId;
+  const specialUseDescription =
+    !!previousDescription &&
+    ((balls === 0 && strikes === 0) ||
+      (isTopInning &&
+        offenseTeamId &&
+        homeTeamId &&
+        offenseTeamId === homeTeamId) ||
+      (!isTopInning &&
+        offenseTeamId &&
+        awayTeamId &&
+        offenseTeamId === awayTeamId));
+
+  if (previousDescription && (idsMatch || specialUseDescription)) {
+    return {
+      matchupText: previousDescription,
+      shouldUsePreviousPlayDescription: true,
+    };
+  }
+
+  if (batter && pitcher) {
+    return {
+      matchupText: `${batter} (B.) vs ${pitcher} (P.)`,
+      shouldUsePreviousPlayDescription: false,
+    };
+  }
+
+  return {
+    matchupText: batter || pitcher || null,
+    shouldUsePreviousPlayDescription: false,
+  };
 }
 
 // ----------------------------------------------------------------------------
@@ -1051,9 +1122,9 @@ function buildMlbLiveActivityProps(game, baseProps = null) {
   const awayWinner = awayEntry?.isWinner ?? awayTeam?.isWinner ?? false;
   const homeWinner = homeEntry?.isWinner ?? homeTeam?.isWinner ?? false;
   const bases = {
-    first: linescore?.offense?.first ?? baseProps?.bases?.first ?? false,
-    second: linescore?.offense?.second ?? baseProps?.bases?.second ?? false,
-    third: linescore?.offense?.third ?? baseProps?.bases?.third ?? false,
+    first: !!linescore?.offense?.first,
+    second: !!linescore?.offense?.second,
+    third: !!linescore?.offense?.third,
   };
   const balls = Number(linescore?.balls ?? baseProps?.status?.balls ?? 0);
   const strikes = Number(linescore?.strikes ?? baseProps?.status?.strikes ?? 0);
@@ -1062,6 +1133,7 @@ function buildMlbLiveActivityProps(game, baseProps = null) {
     linescore?.offense?.batter?.fullName ?? baseProps?.status?.batter ?? null;
   const pitcher =
     linescore?.defense?.pitcher?.fullName ?? baseProps?.status?.pitcher ?? null;
+  const matchupInfo = getMlbLiveActivityMatchupText(game, baseProps);
   const currentInningOrdinal = String(
     linescore?.currentInningOrdinal ||
       baseProps?.status?.currentInningOrdinal ||
@@ -1070,14 +1142,16 @@ function buildMlbLiveActivityProps(game, baseProps = null) {
       "",
   );
   const inning = String(
-    linescore?.currentInning ?? baseProps?.status?.inning ?? (effectiveStatusCode === "F" ? 9 : null),
+    linescore?.currentInning ??
+      baseProps?.status?.inning ??
+      (effectiveStatusCode === "F" ? 9 : null),
   );
   const inningState =
     linescore?.isTopInning === true
       ? "Top"
       : linescore?.isTopInning === false
         ? "Bottom"
-        : baseProps?.status?.inningState ?? null;
+        : (baseProps?.status?.inningState ?? null);
   const detailedState = String(
     status?.detailedState || status?.status || baseProps?.status?.text || "",
   );
@@ -1114,9 +1188,11 @@ function buildMlbLiveActivityProps(game, baseProps = null) {
       batter,
       pitcher,
       bases,
+      matchupText: matchupInfo.matchupText,
       ticking: effectiveStatusCode === "I" || effectiveStatusCode === "M",
     },
     bases,
+    matchupText: matchupInfo.matchupText,
     home: {
       ...baseHome,
       name: homeTeam?.name || "Home",
@@ -1174,6 +1250,8 @@ function buildMlbLiveActivitySignature(game) {
     game?.linescore || game?.liveData?.linescore || game?.live?.linescore || {};
   const awayEntry = game?.teams?.away || {};
   const homeEntry = game?.teams?.home || {};
+  const previousPlay =
+    game?.previousPlay || game?.liveData?.plays?.currentPlay || null;
   return [
     String(game?.status?.codedGameState || game?.status?.statusCode || ""),
     String(game?.status?.detailedState || game?.status?.status || ""),
@@ -1196,6 +1274,9 @@ function buildMlbLiveActivitySignature(game) {
     String(linescore?.offense?.third ? 1 : 0),
     String(linescore?.offense?.batter?.fullName || ""),
     String(linescore?.defense?.pitcher?.fullName || ""),
+    String(previousPlay?.result?.description || ""),
+    String(previousPlay?.matchup?.batter?.id || ""),
+    String(previousPlay?.matchup?.pitcher?.id || ""),
   ].join("|");
 }
 
@@ -1393,38 +1474,54 @@ async function fetchMlbGameForLiveActivity(gamePk) {
   const key = String(gamePk || "").trim();
   if (!key) return null;
 
-  const url = `${BASE_URL}v1.1/game/${encodeURIComponent(key)}/feed/live`;
+  const url = `${BASE_URL}v1/schedule/games/?sportId=1&gamePk=${encodeURIComponent(key)}&hydrate=${encodeURIComponent(MLB_LIVE_ACTIVITY_HYDRATE)}&fields=${encodeURIComponent(MLB_LIVE_ACTIVITY_FIELDS)}`;
   logMlbLiveActivity("fetch-start", { gamePk: key, url });
   const res = await axios.get(url, { timeout: 10000 });
   const raw = res.data || {};
   const gameData = raw.gameData || {};
   const liveData = raw.liveData || raw.live || {};
   const linescore = liveData?.linescore || raw.linescore || null;
+  const awaySource = raw.teams?.away ?? gameData?.teams?.away ?? null;
+  const homeSource = raw.teams?.home ?? gameData?.teams?.home ?? null;
   const game = {
     gamePk: raw.gamePk ?? Number(key),
-    gameType: gameData?.game?.type ?? gameData?.gameType ?? null,
-    gameDate: gameData?.datetime?.dateTime ?? gameData?.game?.dateTime ?? null,
-    status: gameData?.status || null,
-    venue: gameData?.venue || null,
+    gameType:
+      raw.gameType ?? gameData?.game?.type ?? gameData?.gameType ?? null,
+    gameDate:
+      raw.gameDate ??
+      gameData?.datetime?.dateTime ??
+      gameData?.game?.dateTime ??
+      null,
+    status: raw.status || gameData?.status || null,
+    venue: raw.venue || gameData?.venue || null,
     teams: {
-      away: gameData?.teams?.away
+      away: awaySource
         ? {
-            team: gameData.teams.away,
+            team: awaySource?.team || awaySource,
             score:
-              linescore?.teams?.away?.runs ?? gameData.teams.away.score ?? 0,
-            isWinner: gameData.teams.away.isWinner ?? false,
+              awaySource?.score ??
+              linescore?.teams?.away?.runs ??
+              gameData?.teams?.away?.score ??
+              0,
+            isWinner:
+              awaySource?.isWinner ?? gameData?.teams?.away?.isWinner ?? false,
           }
         : null,
-      home: gameData?.teams?.home
+      home: homeSource
         ? {
-            team: gameData.teams.home,
+            team: homeSource?.team || homeSource,
             score:
-              linescore?.teams?.home?.runs ?? gameData.teams.home.score ?? 0,
-            isWinner: gameData.teams.home.isWinner ?? false,
+              homeSource?.score ??
+              linescore?.teams?.home?.runs ??
+              gameData?.teams?.home?.score ??
+              0,
+            isWinner:
+              homeSource?.isWinner ?? gameData?.teams?.home?.isWinner ?? false,
           }
         : null,
     },
     linescore,
+    previousPlay: raw.previousPlay || liveData?.plays?.currentPlay || null,
     liveData,
     gameData,
   };
@@ -5190,9 +5287,12 @@ app.post("/live-activity/register-push-to-start", (req, res) => {
       bundleId: String(bundleId),
       fixtureId: fixtureId || null,
       token: maskToken(token),
-      bundleTokenCount: (pushToStartTokens.get(String(bundleId).trim()) || new Set()).size,
+      bundleTokenCount: (
+        pushToStartTokens.get(String(bundleId).trim()) || new Set()
+      ).size,
       fixtureTokenCount: fixtureId
-        ? (fixturePushToStartTokens.get(String(fixtureId).trim()) || new Set()).size
+        ? (fixturePushToStartTokens.get(String(fixtureId).trim()) || new Set())
+            .size
         : 0,
     });
 
