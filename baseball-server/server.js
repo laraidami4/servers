@@ -1433,7 +1433,10 @@ async function pushMlbLiveActivityStart({ fixtureId, bundleId, payload }) {
   const fixtureTokens = fixtureKey
     ? await getPushToStartTokensForFixture(fixtureKey)
     : [];
-  const tokens = Array.from(new Set(fixtureTokens));
+  const bundleTokens = bundleKey
+    ? await getPushToStartTokensForBundle(bundleKey)
+    : [];
+  const tokens = Array.from(new Set([...fixtureTokens, ...bundleTokens]));
 
   if (tokens.length === 0) {
     return { sent: false, reason: "no-push-to-start-tokens", tokenCount: 0 };
@@ -1483,6 +1486,8 @@ async function pushMlbLiveActivityStart({ fixtureId, bundleId, payload }) {
   logMlbLiveActivity("start-sent", {
     fixtureId: fixtureKey || null,
     bundleId: bundleKey || null,
+    fixtureTokenCount: fixtureTokens.length,
+    bundleTokenCount: bundleTokens.length,
     tokenCount: tokens.length,
     forwarded: Array.isArray(forwarded) ? forwarded.length : 1,
   });
@@ -5200,7 +5205,7 @@ app.get("/bb/team/:code", async (req, res) => {
 });
 
 // Live Activity token registration for MLB games
-app.post("/live-activity/register-activity-token", (req, res) => {
+app.post("/live-activity/register-activity-token", async (req, res) => {
   try {
     const { gamePk, fixtureId, token } = req.body || {};
     const key = String(gamePk || fixtureId || "").trim();
@@ -5255,7 +5260,7 @@ app.post("/live-activity/register-activity-token", (req, res) => {
   }
 });
 
-app.post("/live-activity/register-push-to-start", (req, res) => {
+app.post("/live-activity/register-push-to-start", async (req, res) => {
   try {
     const { bundleId, fixtureId, token } = req.body || {};
     if (!bundleId || !token) {
@@ -5275,11 +5280,9 @@ app.post("/live-activity/register-push-to-start", (req, res) => {
         : 0,
     });
 
-    Promise.resolve(addPushToStartToken(bundleId, token)).catch(() => {});
+    await addPushToStartToken(bundleId, token);
     if (fixtureId) {
-      Promise.resolve(addFixturePushToStartToken(fixtureId, token)).catch(
-        () => {},
-      );
+      await addFixturePushToStartToken(fixtureId, token);
     }
 
     logMlbLiveActivity("register-push-to-start", {
@@ -5333,9 +5336,17 @@ app.post("/live-activity/start", async (req, res) => {
     resetMlbLiveActivityStartState(key);
 
     const currentFixtureTokens = await getPushToStartTokensForFixture(key);
+    const currentBundleTokens = await getPushToStartTokensForBundle(
+      bundleId || APPLE_BUNDLE_ID,
+    );
+    const currentTokens = Array.from(
+      new Set([...currentFixtureTokens, ...currentBundleTokens]),
+    );
     logMlbLiveActivity("start:token-check", {
       key,
-      tokenCount: currentFixtureTokens.length,
+      tokenCount: currentTokens.length,
+      fixtureTokenCount: currentFixtureTokens.length,
+      bundleTokenCount: currentBundleTokens.length,
       fixtureId: fixtureId || null,
       bundleId: bundleId || APPLE_BUNDLE_ID,
     });
