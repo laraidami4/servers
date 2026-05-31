@@ -98,11 +98,21 @@ const fixturePushToStartTokens = new Map();
 // live-activity instance tokens keyed by gamePk / fixtureId
 const liveActivityTokens = new Map();
 const liveActivityBaseProps = new Map();
+const liveActivityTimestamps = new Map();
 const MLB_LIVE_ACTIVITY_POLL_MS = 5000;
 const MLB_LIVE_ACTIVITY_DISMISSAL_MS = 60 * 60 * 1000;
 
 function logMlbLiveActivity(event, details = {}) {
   console.log(`[baseball live-activity] ${event}`, details);
+}
+
+function nextLiveActivityTimestamp(key) {
+  const normalizedKey = String(key || "").trim() || "__global__";
+  const nowSeconds = Math.floor(Date.now() / 1000);
+  const previous = liveActivityTimestamps.get(normalizedKey) || 0;
+  const next = Math.max(nowSeconds, previous + 1);
+  liveActivityTimestamps.set(normalizedKey, next);
+  return next;
 }
 
 function maskToken(token, visibleChars = 8) {
@@ -329,6 +339,44 @@ function removeLiveActivityToken(token) {
   }
 }
 
+async function findLiveActivityTokenOwner(token) {
+  const key = String(token || "").trim();
+  if (!key) return null;
+
+  for (const [gamePk, tokens] of liveActivityTokens.entries()) {
+    if (tokens.has(key)) {
+      return gamePk;
+    }
+  }
+
+  if (supabaseAdmin) {
+    try {
+      const { data, error } = await supabaseAdmin
+        .from("live_activity_tokens")
+        .select("fixture_id")
+        .eq("token", key)
+        .eq("type", "activity")
+        .maybeSingle();
+
+      if (error) {
+        console.warn(
+          "[baseball live-activity] supabase select activity token owner failed:",
+          error?.message || error,
+        );
+      } else if (data?.fixture_id) {
+        return String(data.fixture_id).trim() || null;
+      }
+    } catch (e) {
+      console.warn(
+        "[baseball live-activity] supabase lookup activity token owner failed:",
+        e?.message || e,
+      );
+    }
+  }
+
+  return null;
+}
+
 async function addPushToStartToken(bundleId, token) {
   const bundleKey = String(bundleId || "").trim();
   const tokenKey = String(token || "").trim();
@@ -525,10 +573,6 @@ function getLiveActivityTokensForGame(gamePk) {
   const key = String(gamePk || "").trim();
   if (!key) return [];
   const tokens = Array.from(liveActivityTokens.get(key) || []);
-  logMlbLiveActivity("activity-token:get", {
-    gamePk: key,
-    tokenCount: tokens.length,
-  });
   return tokens;
 }
 
@@ -1040,6 +1084,7 @@ function ensureGameState(gamePk, game = null) {
       finishedSent: finished,
       hydratedFromCurrentState: true,
       lastLiveActivitySignature: null,
+      lastLiveActivityTimestamp: 0,
       lastScoreSnapshot: {
         away: Number(game?.teams?.away?.score ?? 0),
         home: Number(game?.teams?.home?.score ?? 0),
@@ -1297,12 +1342,12 @@ function isMlbLiveActivityFinished(game) {
   );
 }
 
-function buildMlbLiveActivityEndPayload(props) {
+function buildMlbLiveActivityEndPayload(props, timestampSeconds) {
   const dismissalDate = new Date(Date.now() + MLB_LIVE_ACTIVITY_DISMISSAL_MS);
   return {
     aps: {
       event: "end",
-      timestamp: Math.floor(Date.now() / 1000),
+      timestamp: timestampSeconds || Math.floor(Date.now() / 1000),
       "attributes-type": "LiveActivityAttributes",
       attributes: {},
       "dismissal-date": dismissalDate.toISOString(),
@@ -1318,15 +1363,18 @@ async function sendMlbLiveActivityEnd(gamePk, props) {
   const tokens = getLiveActivityTokensForGame(gamePk);
   if (tokens.length === 0) return { sent: false, reason: "no-tokens" };
 
+  const timestampSeconds = nextLiveActivityTimestamp(gamePk);
+
   const forwarded = await forwardToProvider(
     tokens,
-    buildMlbLiveActivityEndPayload(props),
+    buildMlbLiveActivityEndPayload(props, timestampSeconds),
   );
   logMlbLiveActivity("end-sent", {
     gamePk,
     tokenCount: tokens.length,
     forwarded: Array.isArray(forwarded) ? forwarded.length : 1,
     dismissalMs: MLB_LIVE_ACTIVITY_DISMISSAL_MS,
+    timestamp: timestampSeconds,
   });
   return { sent: true, tokenCount: tokens.length, forwarded };
 }
@@ -1358,6 +1406,7 @@ async function pushMlbLiveActivityUpdate(game) {
       previousScoreSnapshot.home !== nextScoreSnapshot.home);
   liveActivityBaseProps.set(gamePk, nextProps);
   gameState.lastScoreSnapshot = nextScoreSnapshot;
+  const timestampSeconds = nextLiveActivityTimestamp(gamePk);
 
   let alert = null;
   if (scoreChanged) {
@@ -1386,7 +1435,7 @@ async function pushMlbLiveActivityUpdate(game) {
         name: "FootballLiveActivity",
         props: JSON.stringify(nextProps),
       },
-      timestamp: Math.floor(Date.now() / 1000),
+      timestamp: timestampSeconds,
       ...(alert ? { alert } : {}),
     },
   };
@@ -1403,6 +1452,7 @@ async function pushMlbLiveActivityUpdate(game) {
     gamePk,
     tokenCount: tokens.length,
     signature,
+    timestamp: timestampSeconds,
     forwarded: Array.isArray(forwarded) ? forwarded.length : 1,
   });
   return { sent: true, tokenCount: tokens.length, forwarded };
@@ -1420,10 +1470,12 @@ async function pushMlbLiveActivityStart({ fixtureId, bundleId, payload }) {
     return { sent: false, reason: "no-push-to-start-tokens", tokenCount: 0 };
   }
 
+  const timestampSeconds = nextLiveActivityTimestamp(fixtureKey);
+
   const startPayload = {
     aps: {
       event: "start",
-      timestamp: Math.floor(Date.now() / 1000),
+      timestamp: timestampSeconds,
       "attributes-type": "LiveActivityAttributes",
       attributes: {},
       alert: {
@@ -1466,6 +1518,7 @@ async function pushMlbLiveActivityStart({ fixtureId, bundleId, payload }) {
     bundleId: bundleKey || null,
     tokenCount: tokens.length,
     forwarded: Array.isArray(forwarded) ? forwarded.length : 1,
+    timestamp: timestampSeconds,
   });
   return { sent: true, tokenCount: tokens.length, forwarded };
 }
@@ -5206,6 +5259,20 @@ app.post("/live-activity/register-activity-token", async (req, res) => {
       token: maskToken(token),
       existingCount: (liveActivityTokens.get(key) || new Set()).size,
     });
+
+    const existingOwner = await findLiveActivityTokenOwner(token);
+    if (existingOwner && existingOwner !== key) {
+      logMlbLiveActivity("register-activity-token:token-owned-by-other-game", {
+        token: maskToken(token),
+        key,
+        existingOwner,
+      });
+      return res.status(409).json({
+        ok: false,
+        error: "activity token already registered for another game",
+        existingOwner,
+      });
+    }
 
     const tokens = liveActivityTokens.get(key) || new Set();
     tokens.add(String(token));
