@@ -27,6 +27,9 @@ const APNS_HOST =
   (process.env.APNS_USE_PRODUCTION === "true"
     ? "https://api.push.apple.com"
     : "https://api.sandbox.push.apple.com");
+const APNS_FALLBACK_HOST = APNS_HOST.includes("sandbox")
+  ? "https://api.push.apple.com"
+  : "https://api.sandbox.push.apple.com";
 const APNS_TOPIC = APPLE_BUNDLE_ID
   ? `${APPLE_BUNDLE_ID}.push-type.liveactivity`
   : null;
@@ -164,73 +167,92 @@ async function sendToAPNs(deviceToken, payload, opts = {}) {
   const maxAttempts = opts.maxAttempts ?? 3;
   let attempt = 0;
   let lastErr = null;
+  const hosts = Array.from(new Set([APNS_HOST, APNS_FALLBACK_HOST]));
 
   while (attempt < maxAttempts) {
     attempt += 1;
     try {
-      const client = http2.connect(APNS_HOST);
-      logMlbLiveActivity("apns-connect", {
-        deviceToken: String(deviceToken || "").slice(0, 8),
-        attempt,
-        host: APNS_HOST,
-      });
-      const statusAndBody = await new Promise(
-        (resolveRequest, rejectRequest) => {
-          client.on("error", (err) => {
-            try {
-              client.close();
-            } catch (e) {}
-            rejectRequest(err);
-          });
-
-          const request = client.request({
-            ":method": "POST",
-            ":path": `/3/device/${deviceToken}`,
-            authorization: `bearer ${jwtToken}`,
-            "apns-topic": APNS_TOPIC,
-            "apns-push-type": "liveactivity",
-            "content-type": "application/json",
-          });
-
-          let status = null;
-          let responseBody = "";
-          request.on("response", (headers) => {
-            status = headers[":status"];
-          });
-          request.on("data", (chunk) => {
-            responseBody += chunk?.toString?.("utf8") || "";
-          });
-          request.on("end", () => {
-            try {
-              client.close();
-            } catch (e) {}
-            const sts = Number(status) || 0;
-            if ([400, 403, 404, 410].includes(sts)) {
+      for (const host of hosts) {
+        const client = http2.connect(host);
+        logMlbLiveActivity("apns-connect", {
+          deviceToken: String(deviceToken || "").slice(0, 8),
+          attempt,
+          host,
+        });
+        const statusAndBody = await new Promise(
+          (resolveRequest, rejectRequest) => {
+            client.on("error", (err) => {
               try {
-                removeLiveActivityToken(deviceToken);
+                client.close();
               } catch (e) {}
-            }
-            logMlbLiveActivity("apns-response", {
-              deviceToken: String(deviceToken || "").slice(0, 8),
-              status: sts || 200,
-              host: APNS_HOST,
-              body: responseBody || null,
+              rejectRequest(err);
             });
-            resolveRequest({ status: sts || 200, body: responseBody || "" });
-          });
-          request.on("error", (err) => {
-            try {
-              client.close();
-            } catch (e) {}
-            rejectRequest(err);
-          });
 
-          request.write(JSON.stringify(payload));
-          request.end();
-        },
-      );
+            const request = client.request({
+              ":method": "POST",
+              ":path": `/3/device/${deviceToken}`,
+              authorization: `bearer ${jwtToken}`,
+              "apns-topic": APNS_TOPIC,
+              "apns-push-type": "liveactivity",
+              "content-type": "application/json",
+            });
 
-      return statusAndBody;
+            let status = null;
+            let responseBody = "";
+            request.on("response", (headers) => {
+              status = headers[":status"];
+            });
+            request.on("data", (chunk) => {
+              responseBody += chunk?.toString?.("utf8") || "";
+            });
+            request.on("end", () => {
+              try {
+                client.close();
+              } catch (e) {}
+              const sts = Number(status) || 0;
+              if ([400, 403, 404, 410].includes(sts)) {
+                try {
+                  removeLiveActivityToken(deviceToken);
+                } catch (e) {}
+              }
+              logMlbLiveActivity("apns-response", {
+                deviceToken: String(deviceToken || "").slice(0, 8),
+                status: sts || 200,
+                host,
+                body: responseBody || null,
+              });
+              resolveRequest({ status: sts || 200, body: responseBody || "" });
+            });
+            request.on("error", (err) => {
+              try {
+                client.close();
+              } catch (e) {}
+              rejectRequest(err);
+            });
+
+            request.write(JSON.stringify(payload));
+            request.end();
+          },
+        );
+
+        if (statusAndBody.status === 400) {
+          const reason = String(statusAndBody.body || "");
+          if (
+            reason.includes("BadDeviceToken") &&
+            host !== hosts[hosts.length - 1]
+          ) {
+            logMlbLiveActivity("apns-bad-device-token-retry", {
+              deviceToken: String(deviceToken || "").slice(0, 8),
+              attempt,
+              host,
+              fallbackHost: hosts[hosts.length - 1],
+            });
+            continue;
+          }
+        }
+
+        return statusAndBody;
+      }
     } catch (e) {
       lastErr = e;
       logMlbLiveActivity("apns-error", {
