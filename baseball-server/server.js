@@ -1064,8 +1064,13 @@ function buildMlbLiveActivityProps(game, baseProps = null) {
     !!currentPitcherId &&
     previousPlayBatterId === currentBatterId &&
     previousPlayPitcherId === currentPitcherId;
+  const countIsReset = balls === 0 && strikes === 0;
+  const inningEnded = outs >= 3;
+  const shouldShowPreviousPlay =
+    !!previousPlayDescription &&
+    (previousPlayMatchesCurrentMatchup || countIsReset || inningEnded);
   const matchupText =
-    previousPlayMatchesCurrentMatchup && previousPlayDescription
+    shouldShowPreviousPlay && previousPlayDescription
       ? previousPlayDescription
       : batter && pitcher
         ? `${batter} (B.) vs ${pitcher} (P.)`
@@ -1123,9 +1128,11 @@ function buildMlbLiveActivityProps(game, baseProps = null) {
       outs,
       batter,
       pitcher,
+      previousPlayMatchesCurrentMatchup,
+      countIsReset,
+      inningEnded,
       matchupText,
       previousPlayDescription: previousPlayDescription || null,
-      previousPlayMatchesCurrentMatchup,
       bases,
       ticking: effectiveStatusCode === "I" || effectiveStatusCode === "M",
     },
