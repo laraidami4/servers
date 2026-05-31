@@ -337,6 +337,16 @@ function removeLiveActivityToken(token) {
       liveActivityTokens.set(gamePk, tokens);
     }
   }
+
+  if (supabaseAdmin) {
+    supabaseAdmin
+      .from("live_activity_tokens")
+      .delete()
+      .eq("token", key)
+      .eq("type", "activity")
+      .then(() => {})
+      .catch(() => {});
+  }
 }
 
 async function findLiveActivityTokenOwner(token) {
@@ -375,6 +385,62 @@ async function findLiveActivityTokenOwner(token) {
   }
 
   return null;
+}
+
+async function hydrateLiveActivityTokens() {
+  if (!supabaseAdmin) return { hydratedGames: 0, hydratedTokens: 0 };
+
+  try {
+    const { data, error } = await supabaseAdmin
+      .from("live_activity_tokens")
+      .select("fixture_id,token")
+      .eq("type", "activity");
+
+    if (error) {
+      console.warn(
+        "[baseball live-activity] supabase hydrate activity tokens failed:",
+        error?.message || error,
+      );
+      return { hydratedGames: 0, hydratedTokens: 0 };
+    }
+
+    const byGame = new Map();
+    for (const row of Array.isArray(data) ? data : []) {
+      const gamePk = String(row?.fixture_id || "").trim();
+      const token = String(row?.token || "").trim();
+      if (!gamePk || !token) continue;
+
+      let tokens = byGame.get(gamePk);
+      if (!tokens) {
+        tokens = new Set();
+        byGame.set(gamePk, tokens);
+      }
+      tokens.add(token);
+    }
+
+    liveActivityTokens.clear();
+    let tokenCount = 0;
+    for (const [gamePk, tokens] of byGame.entries()) {
+      liveActivityTokens.set(gamePk, tokens);
+      tokenCount += tokens.size;
+    }
+
+    logMlbLiveActivity("hydrate-activity-tokens", {
+      hydratedGames: liveActivityTokens.size,
+      hydratedTokens: tokenCount,
+    });
+
+    return {
+      hydratedGames: liveActivityTokens.size,
+      hydratedTokens: tokenCount,
+    };
+  } catch (e) {
+    console.warn(
+      "[baseball live-activity] hydrate activity tokens failed:",
+      e?.message || e,
+    );
+    return { hydratedGames: 0, hydratedTokens: 0 };
+  }
 }
 
 async function addPushToStartToken(bundleId, token) {
@@ -5281,6 +5347,37 @@ app.post("/live-activity/register-activity-token", async (req, res) => {
       liveActivityBaseProps.set(key, req.body.props);
     }
 
+    if (supabaseAdmin) {
+      try {
+        await supabaseAdmin
+          .from("live_activity_tokens")
+          .delete()
+          .eq("token", String(token))
+          .eq("type", "activity");
+        const { error } = await supabaseAdmin
+          .from("live_activity_tokens")
+          .insert([
+            {
+              type: "activity",
+              bundle_id: null,
+              token: String(token),
+              fixture_id: key,
+            },
+          ]);
+        if (error) {
+          logMlbLiveActivity("register-token-db-save-error", {
+            key,
+            error: error?.message || String(error),
+          });
+        }
+      } catch (error) {
+        logMlbLiveActivity("register-token-db-save-error", {
+          key,
+          error: error?.message || String(error),
+        });
+      }
+    }
+
     if (rowUserId) {
       try {
         const row = await upsertMlbFavRow({
@@ -5456,6 +5553,7 @@ app.listen(PORT, async () => {
   logMlbLiveActivity("server-start", { port: PORT });
   await warmLeagues();
   await warmBBTeams();
+  await hydrateLiveActivityTokens();
   startMlbNotificationsLoop();
   startMlbLiveActivityLoop();
   loadMlbFavSubscribers()
