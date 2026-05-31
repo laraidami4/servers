@@ -174,57 +174,63 @@ async function sendToAPNs(deviceToken, payload, opts = {}) {
         attempt,
         host: APNS_HOST,
       });
-      const status = await new Promise((resolveRequest, rejectRequest) => {
-        client.on("error", (err) => {
-          try {
-            client.close();
-          } catch (e) {}
-          rejectRequest(err);
-        });
-
-        const request = client.request({
-          ":method": "POST",
-          ":path": `/3/device/${deviceToken}`,
-          authorization: `bearer ${jwtToken}`,
-          "apns-topic": APNS_TOPIC,
-          "apns-push-type": "liveactivity",
-          "content-type": "application/json",
-        });
-
-        let status = null;
-        request.on("response", (headers) => {
-          status = headers[":status"];
-        });
-        request.on("data", () => {});
-        request.on("end", () => {
-          try {
-            client.close();
-          } catch (e) {}
-          const sts = Number(status) || 0;
-          if ([400, 403, 404, 410].includes(sts)) {
+      const statusAndBody = await new Promise(
+        (resolveRequest, rejectRequest) => {
+          client.on("error", (err) => {
             try {
-              removeLiveActivityToken(deviceToken);
+              client.close();
             } catch (e) {}
-          }
-          logMlbLiveActivity("apns-response", {
-            deviceToken: String(deviceToken || "").slice(0, 8),
-            status: sts || 200,
-            host: APNS_HOST,
+            rejectRequest(err);
           });
-          resolveRequest(sts || 200);
-        });
-        request.on("error", (err) => {
-          try {
-            client.close();
-          } catch (e) {}
-          rejectRequest(err);
-        });
 
-        request.write(JSON.stringify(payload));
-        request.end();
-      });
+          const request = client.request({
+            ":method": "POST",
+            ":path": `/3/device/${deviceToken}`,
+            authorization: `bearer ${jwtToken}`,
+            "apns-topic": APNS_TOPIC,
+            "apns-push-type": "liveactivity",
+            "content-type": "application/json",
+          });
 
-      return { status };
+          let status = null;
+          let responseBody = "";
+          request.on("response", (headers) => {
+            status = headers[":status"];
+          });
+          request.on("data", (chunk) => {
+            responseBody += chunk?.toString?.("utf8") || "";
+          });
+          request.on("end", () => {
+            try {
+              client.close();
+            } catch (e) {}
+            const sts = Number(status) || 0;
+            if ([400, 403, 404, 410].includes(sts)) {
+              try {
+                removeLiveActivityToken(deviceToken);
+              } catch (e) {}
+            }
+            logMlbLiveActivity("apns-response", {
+              deviceToken: String(deviceToken || "").slice(0, 8),
+              status: sts || 200,
+              host: APNS_HOST,
+              body: responseBody || null,
+            });
+            resolveRequest({ status: sts || 200, body: responseBody || "" });
+          });
+          request.on("error", (err) => {
+            try {
+              client.close();
+            } catch (e) {}
+            rejectRequest(err);
+          });
+
+          request.write(JSON.stringify(payload));
+          request.end();
+        },
+      );
+
+      return statusAndBody;
     } catch (e) {
       lastErr = e;
       logMlbLiveActivity("apns-error", {
