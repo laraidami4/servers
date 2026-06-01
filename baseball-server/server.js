@@ -426,6 +426,25 @@ function removeLiveActivityToken(token) {
   }
 }
 
+function clearLiveActivityTracking(gamePk) {
+  const key = String(gamePk || "").trim();
+  if (!key) return { tokenCount: 0 };
+
+  const tokens = Array.from(liveActivityTokens.get(key) || []);
+  for (const token of tokens) {
+    liveActivityTokenOwners.delete(token);
+  }
+  liveActivityTokens.delete(key);
+  liveActivityBaseProps.delete(key);
+  const gameState = mlbNotifState.gameStates.get(key) || null;
+  if (gameState) {
+    gameState.lastLiveActivitySignature = null;
+    gameState.lastPreviousPlayDescription = null;
+  }
+
+  return { tokenCount: tokens.length };
+}
+
 async function addPushToStartToken(bundleId, token) {
   const bundleKey = String(bundleId || "").trim();
   const tokenKey = String(token || "").trim();
@@ -1566,6 +1585,8 @@ async function sendMlbLiveActivityEnd(gamePk, props) {
     forwarded: Array.isArray(forwarded) ? forwarded.length : 1,
     dismissalMs: MLB_LIVE_ACTIVITY_DISMISSAL_MS,
   });
+
+  clearLiveActivityTracking(gamePk);
   return { sent: true, tokenCount: tokens.length, forwarded };
 }
 
