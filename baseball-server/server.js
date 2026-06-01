@@ -5693,6 +5693,31 @@ app.post("/live-activity/update", async (req, res) => {
     if (String(action || event || "").toLowerCase() === "end") {
       const baseProps = liveActivityBaseProps.get(key) || null;
       const game = await fetchMlbGameForLiveActivity(key).catch(() => null);
+      // Diagnostic dump: log current server-side token/props/gameState for this key
+      try {
+        const tokensList = Array.from(liveActivityTokens.get(key) || []);
+        const basePropsSummary = summarizeLiveActivityPayload(baseProps);
+        const gs = mlbNotifState.gameStates.get(key) || {};
+        logMlbLiveActivity("update-end:diagnostic", {
+          key,
+          tokensCount: tokensList.length,
+          tokens: tokensList.slice(0, 5),
+          hasBaseProps: !!baseProps,
+          basePropsSummary,
+          gameState: {
+            lastLiveActivitySignature: gs?.lastLiveActivitySignature || null,
+            lastPreviousPlayDescription:
+              gs?.lastPreviousPlayDescription || null,
+            suppressUntilMs: gs?.suppressUntilMs || null,
+            didSendDismissalEnd: gs?.didSendDismissalEnd || null,
+          },
+        });
+      } catch (e) {
+        logMlbLiveActivity("update-end:diagnostic-error", {
+          key,
+          error: e?.message || String(e),
+        });
+      }
       const payload =
         game != null ? buildMlbLiveActivityProps(game, baseProps) : baseProps;
 
