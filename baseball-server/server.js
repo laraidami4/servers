@@ -1169,17 +1169,17 @@ function buildMlbLiveActivityProps(game, baseProps = null) {
   const previousPlayData = getMlbLiveActivityPreviousPlayData(game);
   const offenseTeamId = previousPlayData.teamIds.offense;
   const defenseTeamId = previousPlayData.teamIds.defense;
-  const offenseBaseState = linescore?.offense || null;
-  const previousBases = baseProps?.bases || baseProps?.status?.bases || null;
   const resolveBaseValue = (baseName) => {
+    if (!offenseBaseState) {
+      return previousBases?.[baseName] ?? false;
+    }
+
     const baseEntry =
       baseName === "base1"
-        ? offenseBaseState?.first
+        ? offenseBaseState.first
         : baseName === "base2"
-          ? offenseBaseState?.second
-          : baseName === "base3"
-            ? offenseBaseState?.third
-            : null;
+          ? offenseBaseState.second
+          : offenseBaseState.third;
 
     if (baseEntry && typeof baseEntry === "object") {
       return !!baseEntry.id;
@@ -1501,6 +1501,19 @@ async function pushMlbLiveActivityUpdate(game) {
   ) {
     return { sent: false, reason: "suppressed", tokenCount: tokens.length };
   }
+
+  const signatureLinescore =
+    game?.linescore || game?.liveData?.linescore || game?.live?.linescore || {};
+
+  logMlbLiveActivity("signature-debug", {
+    gamePk,
+    offensePresent: !!signatureLinescore?.offense,
+    first: signatureLinescore?.offense?.first?.id,
+    second: signatureLinescore?.offense?.second?.id,
+    third: signatureLinescore?.offense?.third?.id,
+    batter: signatureLinescore?.offense?.batter?.fullName,
+  });
+
   const signature = buildMlbLiveActivitySignature(game);
   if (gameState.lastLiveActivitySignature === signature) {
     return { sent: false, reason: "unchanged", tokenCount: tokens.length };
@@ -1510,9 +1523,12 @@ async function pushMlbLiveActivityUpdate(game) {
   const baseProps = liveActivityBaseProps.get(gamePk) || null;
   const nextProps = buildMlbLiveActivityProps(game, baseProps);
 
+  const debugLinescore =
+    game?.linescore || game?.liveData?.linescore || game?.live?.linescore || {};
+
   logMlbLiveActivity("bases-debug", {
     gamePk,
-    offense: game?.linescore?.offense,
+    offense: debugLinescore?.offense,
     bases: nextProps?.bases,
   });
 
