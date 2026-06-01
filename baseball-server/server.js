@@ -92,7 +92,7 @@ const liveActivityTokens = new Map();
 const liveActivityTokenOwners = new Map();
 const liveActivityBaseProps = new Map();
 const MLB_LIVE_ACTIVITY_POLL_MS = 5000;
-const MLB_LIVE_ACTIVITY_DISMISSAL_MS = 5 * 60 * 1000;
+const MLB_LIVE_ACTIVITY_DISMISSAL_MS = 15 * 60 * 1000;
 const MLB_LIVE_ACTIVITY_HYDRATE = "linescore,previousPlay";
 const MLB_LIVE_ACTIVITY_FIELDS =
   "dates,games,gamePk,gameType,gameDate,status,codedGameState,detailedState,teams,away,team,id,name,score,isWinner,home,linescore,currentInning,currentInningOrdinal,isTopInning,defense,team,id,name,pitcher,id,fullName,offense,team,id,name,batter,id,fullName,first,second,third,balls,strikes,outs,venue,previousPlay,result,description,matchup";
@@ -1548,8 +1548,10 @@ function isMlbLiveActivityFinished(game) {
   );
 }
 
-function buildMlbLiveActivityEndPayload(props) {
-  const dismissalDate = new Date(Date.now() + MLB_LIVE_ACTIVITY_DISMISSAL_MS);
+function buildMlbLiveActivityEndPayload(props, opts = {}) {
+  const immediate = !!opts.immediate;
+  const dismissalMs = immediate ? 0 : MLB_LIVE_ACTIVITY_DISMISSAL_MS;
+  const dismissalDate = new Date(Date.now() + dismissalMs);
   const awayName = String(props?.away?.name || "Away");
   const homeName = String(props?.home?.name || "Home");
   const awayScore = Number(props?.away?.score ?? 0);
@@ -1571,7 +1573,7 @@ function buildMlbLiveActivityEndPayload(props) {
   };
 }
 
-async function sendMlbLiveActivityEnd(gamePk, props) {
+async function sendMlbLiveActivityEnd(gamePk, props, opts = {}) {
   let tokens = getLiveActivityTokensForGame(gamePk);
   // If there are no registered activity tokens yet (fast stop after server-start),
   // fall back to any push-to-start tokens we have for the fixture or bundle so
@@ -1600,19 +1602,24 @@ async function sendMlbLiveActivityEnd(gamePk, props) {
 
   const forwarded = await forwardToProvider(
     tokens,
-    buildMlbLiveActivityEndPayload(props),
+    buildMlbLiveActivityEndPayload(props, opts),
   );
+  const usedDismissalMs =
+    opts && opts.immediate ? 0 : MLB_LIVE_ACTIVITY_DISMISSAL_MS;
   logMlbLiveActivity("end-sent", {
     gamePk,
     tokenCount: tokens.length,
     forwarded: Array.isArray(forwarded) ? forwarded.length : 1,
-    dismissalMs: MLB_LIVE_ACTIVITY_DISMISSAL_MS,
+    dismissalMs: usedDismissalMs,
+    immediate: !!opts.immediate,
   });
 
   // mark game state to suppress further updates for a short dismissal window
   try {
     const gameState = ensureGameState(gamePk, { gamePk });
-    gameState.suppressUntilMs = Date.now() + MLB_LIVE_ACTIVITY_DISMISSAL_MS;
+    const suppressMs =
+      opts && opts.immediate ? 1000 : MLB_LIVE_ACTIVITY_DISMISSAL_MS;
+    gameState.suppressUntilMs = Date.now() + suppressMs;
     gameState.didSendDismissalEnd = true;
   } catch (e) {
     logMlbLiveActivity("end-mark-suppress-failed", {
@@ -5728,7 +5735,9 @@ app.post("/live-activity/update", async (req, res) => {
       liveActivityBaseProps.set(key, payload);
       const gameState = ensureGameState(key, game || { gamePk: key });
       gameState.didSendDismissalEnd = true;
-      const result = await sendMlbLiveActivityEnd(key, payload);
+      const result = await sendMlbLiveActivityEnd(key, payload, {
+        immediate: true,
+      });
       return res.json({ ok: true, key, ...result });
     }
 
