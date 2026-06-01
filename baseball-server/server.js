@@ -1274,36 +1274,11 @@ function buildMlbLiveActivityProps(game, baseProps = null) {
             : null;
 
     if (baseEntry && typeof baseEntry === "object") {
-      return !!baseEntry?.id;
+      return !!baseEntry.id;
     }
 
-    const legacyBaseValue =
-      baseName === "base1"
-        ? offenseBaseState?.first
-        : baseName === "base2"
-          ? offenseBaseState?.second
-          : baseName === "base3"
-            ? offenseBaseState?.third
-            : null;
-
-    if (typeof legacyBaseValue === "boolean") {
-      return legacyBaseValue;
-    }
-
-    if (previousBases && typeof previousBases === "object") {
-      const previousValue =
-        previousBases?.[baseName] ??
-        previousBases?.[
-          baseName === "base1"
-            ? "first"
-            : baseName === "base2"
-              ? "second"
-              : "third"
-        ];
-
-      if (typeof previousValue === "boolean") {
-        return previousValue;
-      }
+    if (typeof baseEntry === "boolean") {
+      return baseEntry;
     }
 
     return false;
@@ -1647,6 +1622,12 @@ async function pushMlbLiveActivityUpdate(game) {
   gameState.lastLiveActivitySignature = signature;
   const baseProps = liveActivityBaseProps.get(gamePk) || null;
   const nextProps = buildMlbLiveActivityProps(game, baseProps);
+
+  const nextScoreSnapshot = {
+    away: Number(nextProps?.away?.score ?? 0),
+    home: Number(nextProps?.home?.score ?? 0),
+  };
+
   const previousDescription = gameState.lastPreviousPlayDescription || "";
   const { alert, scoringPlayKey } = buildMlbLiveActivityScoreAlert(
     gameState.lastAlertedScoringPlay,
