@@ -1572,8 +1572,31 @@ function buildMlbLiveActivityEndPayload(props) {
 }
 
 async function sendMlbLiveActivityEnd(gamePk, props) {
-  const tokens = getLiveActivityTokensForGame(gamePk);
-  if (tokens.length === 0) return { sent: false, reason: "no-tokens" };
+  let tokens = getLiveActivityTokensForGame(gamePk);
+  // If there are no registered activity tokens yet (fast stop after server-start),
+  // fall back to any push-to-start tokens we have for the fixture or bundle so
+  // the device still receives an end/dismissal.
+  if (!tokens || tokens.length === 0) {
+    logMlbLiveActivity("end-no-activity-tokens", {
+      gamePk,
+      note: "falling-back-to-push-to-start",
+    });
+    const fixtureTokens = await getPushToStartTokensForFixture(gamePk).catch(
+      () => [],
+    );
+    const bundleTokens = await getPushToStartTokensForBundle(
+      APPLE_BUNDLE_ID,
+    ).catch(() => []);
+    tokens = Array.from(
+      new Set([...(fixtureTokens || []), ...(bundleTokens || [])]),
+    );
+    if (!tokens || tokens.length === 0) {
+      logMlbLiveActivity("end-no-tokens-found", { gamePk });
+      // Still perform cleanup of any server-side base props so we stop polling
+      clearLiveActivityTracking(gamePk);
+      return { sent: false, reason: "no-tokens" };
+    }
+  }
 
   const forwarded = await forwardToProvider(
     tokens,
