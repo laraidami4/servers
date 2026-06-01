@@ -92,7 +92,7 @@ const liveActivityTokens = new Map();
 const liveActivityTokenOwners = new Map();
 const liveActivityBaseProps = new Map();
 const MLB_LIVE_ACTIVITY_POLL_MS = 5000;
-const MLB_LIVE_ACTIVITY_DISMISSAL_MS = 30 * 60 * 1000;
+const MLB_LIVE_ACTIVITY_DISMISSAL_MS = 5 * 60 * 1000;
 const MLB_LIVE_ACTIVITY_HYDRATE = "linescore,previousPlay";
 const MLB_LIVE_ACTIVITY_FIELDS =
   "dates,games,gamePk,gameType,gameDate,status,codedGameState,detailedState,teams,away,team,id,name,score,isWinner,home,linescore,currentInning,currentInningOrdinal,isTopInning,defense,team,id,name,pitcher,id,fullName,offense,team,id,name,batter,id,fullName,first,second,third,balls,strikes,outs,venue,previousPlay,result,description,matchup";
@@ -1245,24 +1245,54 @@ function buildMlbLiveActivityProps(game, baseProps = null) {
   const offenseBaseState = linescore?.offense || null;
   const previousBases = baseProps?.bases || baseProps?.status?.bases || null;
   const resolveBaseValue = (baseName) => {
-    if (
-      Object.prototype.hasOwnProperty.call(offenseBaseState || {}, baseName)
-    ) {
-      return !!offenseBaseState?.[baseName];
+    const baseEntry =
+      baseName === "base1"
+        ? offenseBaseState?.first
+        : baseName === "base2"
+          ? offenseBaseState?.second
+          : baseName === "base3"
+            ? offenseBaseState?.third
+            : null;
+
+    if (baseEntry && typeof baseEntry === "object") {
+      return !!baseEntry?.id;
+    }
+
+    const legacyBaseValue =
+      baseName === "base1"
+        ? offenseBaseState?.first
+        : baseName === "base2"
+          ? offenseBaseState?.second
+          : baseName === "base3"
+            ? offenseBaseState?.third
+            : null;
+
+    if (typeof legacyBaseValue === "boolean") {
+      return legacyBaseValue;
     }
 
     if (previousBases && typeof previousBases === "object") {
-      if (Object.prototype.hasOwnProperty.call(previousBases, baseName)) {
-        return !!previousBases?.[baseName];
+      const previousValue =
+        previousBases?.[baseName] ??
+        previousBases?.[
+          baseName === "base1"
+            ? "first"
+            : baseName === "base2"
+              ? "second"
+              : "third"
+        ];
+
+      if (typeof previousValue === "boolean") {
+        return previousValue;
       }
     }
 
     return false;
   };
   const bases = {
-    first: resolveBaseValue("first"),
-    second: resolveBaseValue("second"),
-    third: resolveBaseValue("third"),
+    base1: resolveBaseValue("base1"),
+    base2: resolveBaseValue("base2"),
+    base3: resolveBaseValue("base3"),
   };
   const balls = Number(linescore?.balls ?? baseProps?.status?.balls ?? 0);
   const strikes = Number(linescore?.strikes ?? baseProps?.status?.strikes ?? 0);
@@ -1335,9 +1365,16 @@ function buildMlbLiveActivityProps(game, baseProps = null) {
       previousPlayPitcherId: previousPlayData.matchup.pitcher.id,
       offenseTeamId,
       defenseTeamId,
+      base1: bases.base1,
+      base2: bases.base2,
+      base3: bases.base3,
+      bases,
       ticking: effectiveStatusCode === "I" || effectiveStatusCode === "M",
     },
     bases,
+    base1: bases.base1,
+    base2: bases.base2,
+    base3: bases.base3,
     previousPlay: previousPlayData.raw,
     previousPlayDescription: previousPlayData.description,
     previousPlayMatchup: previousPlayData.matchup,
@@ -1420,9 +1457,9 @@ function buildMlbLiveActivitySignature(game) {
     String(linescore?.outs ?? 0),
     String(awayEntry?.score ?? 0),
     String(homeEntry?.score ?? 0),
-    String(linescore?.offense?.first ? 1 : 0),
-    String(linescore?.offense?.second ? 1 : 0),
-    String(linescore?.offense?.third ? 1 : 0),
+    String(linescore?.offense?.first?.id ? 1 : 0),
+    String(linescore?.offense?.second?.id ? 1 : 0),
+    String(linescore?.offense?.third?.id ? 1 : 0),
     String(linescore?.offense?.batter?.fullName || ""),
     String(linescore?.defense?.pitcher?.fullName || ""),
     String(previousPlayData.description || ""),
@@ -1445,36 +1482,30 @@ function buildMlbLiveActivityStartAlert(payload) {
 }
 
 function buildMlbLiveActivityScoreAlert(previousScoreSnapshot, nextProps) {
+  const nextDescription = String(
+    nextProps?.previousPlayDescription || "",
+  ).trim();
   const nextScoreSnapshot = {
     away: Number(nextProps?.away?.score ?? 0),
     home: Number(nextProps?.home?.score ?? 0),
   };
 
-  if (!previousScoreSnapshot) {
+  if (!nextDescription) {
     return { alert: null, nextScoreSnapshot };
   }
 
-  const scoreChanged =
-    previousScoreSnapshot.away !== nextScoreSnapshot.away ||
-    previousScoreSnapshot.home !== nextScoreSnapshot.home;
-
-  if (!scoreChanged) {
+  if (previousScoreSnapshot === nextDescription) {
     return { alert: null, nextScoreSnapshot };
   }
 
-  const awayName = String(nextProps?.away?.name || "Away");
-  const homeName = String(nextProps?.home?.name || "Home");
-  const changedTeam =
-    nextScoreSnapshot.home > previousScoreSnapshot.home
-      ? homeName
-      : nextScoreSnapshot.away > previousScoreSnapshot.away
-        ? awayName
-        : null;
+  if (!/scores/i.test(nextDescription)) {
+    return { alert: null, nextScoreSnapshot };
+  }
 
   return {
     alert: {
-      title: changedTeam ? `${changedTeam} scored` : "Score changed",
-      body: `${awayName} ${nextScoreSnapshot.away} - ${homeName} ${nextScoreSnapshot.home}`,
+      title: "Scoring Play",
+      body: nextDescription,
       sound: "default",
     },
     nextScoreSnapshot,
@@ -1500,6 +1531,10 @@ function isMlbLiveActivityFinished(game) {
 
 function buildMlbLiveActivityEndPayload(props) {
   const dismissalDate = new Date(Date.now() + MLB_LIVE_ACTIVITY_DISMISSAL_MS);
+  const awayName = String(props?.away?.name || "Away");
+  const homeName = String(props?.home?.name || "Home");
+  const awayScore = Number(props?.away?.score ?? 0);
+  const homeScore = Number(props?.home?.score ?? 0);
   return {
     aps: {
       event: "end",
@@ -1508,6 +1543,11 @@ function buildMlbLiveActivityEndPayload(props) {
       attributes: {},
       "dismissal-date": dismissalDate.toISOString(),
       "content-state": buildLiveActivityContentState(props),
+      alert: {
+        title: "Game Over",
+        body: `${awayName} ${awayScore} - ${homeName} ${homeScore}`,
+        sound: "default",
+      },
     },
   };
 }
@@ -1545,13 +1585,16 @@ async function pushMlbLiveActivityUpdate(game) {
   gameState.lastLiveActivitySignature = signature;
   const baseProps = liveActivityBaseProps.get(gamePk) || null;
   const nextProps = buildMlbLiveActivityProps(game, baseProps);
-  const previousScoreSnapshot = gameState.lastScoreSnapshot || null;
+  const previousDescription = gameState.lastPreviousPlayDescription || "";
   const { alert, nextScoreSnapshot } = buildMlbLiveActivityScoreAlert(
-    previousScoreSnapshot,
+    previousDescription,
     nextProps,
   );
   liveActivityBaseProps.set(gamePk, nextProps);
   gameState.lastScoreSnapshot = nextScoreSnapshot;
+  gameState.lastPreviousPlayDescription = String(
+    nextProps?.previousPlayDescription || "",
+  ).trim();
 
   const payload = {
     aps: {
@@ -1569,7 +1612,8 @@ async function pushMlbLiveActivityUpdate(game) {
     contentState: payload.aps["content-state"],
     alert,
     scoreChanged: !!alert,
-    previousScoreSnapshot,
+    previousDescription,
+    nextDescription: nextProps?.previousPlayDescription || null,
     nextScoreSnapshot,
   });
 
@@ -5515,6 +5559,10 @@ app.post("/live-activity/start", async (req, res) => {
     }
 
     resetMlbLiveActivityStartState(key);
+    const startState = ensureGameState(key, null);
+    startState.lastPreviousPlayDescription = String(
+      payload?.previousPlayDescription || "",
+    ).trim();
 
     const currentFixtureTokens = await getPushToStartTokensForFixture(key);
     const currentBundleTokens = await getPushToStartTokensForBundle(
@@ -5563,7 +5611,7 @@ app.post("/live-activity/start", async (req, res) => {
 
 app.post("/live-activity/update", async (req, res) => {
   try {
-    const { gamePk, fixtureId } = req.body || {};
+    const { gamePk, fixtureId, action, event } = req.body || {};
     const key = String(gamePk || fixtureId || "").trim();
     if (!key) {
       return res.status(400).json({ error: "gamePk or fixtureId required" });
@@ -5572,7 +5620,25 @@ app.post("/live-activity/update", async (req, res) => {
     logMlbLiveActivity("update:request", {
       gamePk: gamePk || null,
       fixtureId: fixtureId || null,
+      action: action || event || null,
     });
+
+    if (String(action || event || "").toLowerCase() === "end") {
+      const baseProps = liveActivityBaseProps.get(key) || null;
+      const game = await fetchMlbGameForLiveActivity(key).catch(() => null);
+      const payload =
+        game != null ? buildMlbLiveActivityProps(game, baseProps) : baseProps;
+
+      if (!payload) {
+        return res.status(404).json({ error: "Game not found" });
+      }
+
+      liveActivityBaseProps.set(key, payload);
+      const gameState = ensureGameState(key, game || { gamePk: key });
+      gameState.didSendDismissalEnd = true;
+      const result = await sendMlbLiveActivityEnd(key, payload);
+      return res.json({ ok: true, key, ...result });
+    }
 
     const game = await fetchMlbGameForLiveActivity(key);
     if (!game) {
