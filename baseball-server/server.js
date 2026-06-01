@@ -1403,13 +1403,10 @@ function buildMlbLiveActivityProps(game, baseProps = null) {
     matchupText,
     home: {
       ...baseHome,
+      id: homeTeam?.id || null,
       name: homeTeam?.name || "Home",
       shortName:
-        homeTeam?.abbreviation ||
-        homeTeam?.shortName ||
-        String(homeTeam?.name || "HOME")
-          .slice(0, 3)
-          .toUpperCase(),
+        getTeamAbbr(homeTeam),
       score: homeScore,
       winner: homeWinner,
       logo: baseHome?.logo ?? null,
@@ -1417,13 +1414,10 @@ function buildMlbLiveActivityProps(game, baseProps = null) {
     },
     away: {
       ...baseAway,
+      id: awayTeam?.id || null,
       name: awayTeam?.name || "Away",
       shortName:
-        awayTeam?.abbreviation ||
-        awayTeam?.shortName ||
-        String(awayTeam?.name || "AWAY")
-          .slice(0, 3)
-          .toUpperCase(),
+        getTeamAbbr(awayTeam),
       score: awayScore,
       winner: awayWinner,
       logo: baseAway?.logo ?? null,
@@ -1517,7 +1511,7 @@ function buildMlbLiveActivityScoreAlert(previousScoreSnapshot, nextProps) {
     return { alert: null, nextScoreSnapshot };
   }
 
-  if (!/scores/i.test(nextDescription)) {
+  if (!/(scores|homers)/i.test(nextDescription)) {
     return { alert: null, nextScoreSnapshot };
   }
 
