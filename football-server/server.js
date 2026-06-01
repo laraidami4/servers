@@ -427,7 +427,7 @@ const pushMetrics = {
 };
 
 // ─── API credentials (prefer env vars so tokens aren't baked in) ──────────────
-const SM_TOKEN = process.env.SM_TOKEN || null;
+const SM_TOKEN = process.env.SM_TOKEN || "qQWHXlc9FBi5tjqAHoqQAL7hCY7ABLgu9QxK7chbYZaKwwtRnbsRrvKeKVzZ";
 const SM_BASE = "https://api.sportmonks.com/v3/football";
 const SAP_BASE = "https://v1.football.sportsapipro.com";
 const SAP_KEY = process.env.SAP_KEY || null;
@@ -1349,50 +1349,72 @@ app.get("/football/league/:leagueId", async (req, res) => {
     });
   }
 
-  try {
-    const [standings, teamsInSeason, leagueInfo, stageStats, teamOfTheWeek] =
-      await Promise.all([
-        fetchUrl(
-          `${SM_BASE}/standings/seasons/${seasonId}?api_token=${SM_TOKEN}` +
-            `&include=rule.type;stage;participant;details.type;form;league;group`,
-        ),
-        fetchUrl(
-          `${SM_BASE}/teams/seasons/${seasonId}?api_token=${SM_TOKEN}` +
-            `&include=sidelined.player;sidelined.type;statistics.details.type;players.player;players.detailedPosition;players.position` +
-            `&filters=teamstatisticSeasons:${seasonId}`,
-        ),
-        fetchUrl(
-          `${SM_BASE}/leagues/${leagueId}?api_token=${SM_TOKEN}` +
-            `&include=currentSeason;country;latest.round;latest.aggregate;latest.scores;latest.participants;latest.venue;upcoming.round;upcoming.aggregate;upcoming.participants;upcoming.venue&timezone=America/Toronto`,
-        ),
-        stageId
-          ? fetchUrl(
-              `${SM_BASE}/statistics/stages/${stageId}?api_token=${SM_TOKEN}` +
-                `&include=type;participant`,
-            )
-          : Promise.resolve(null),
-        fetchUrl(
-          `${SM_BASE}/team-of-the-week/leagues/${leagueId}/latest?api_token=${SM_TOKEN}` +
-            `&include=player.country;team;round`,
-        ),
-      ]);
+try {
+  const [standings, teamsInSeason, leagueInfo, stageStats, teamOfTheWeek] =
+    await Promise.all([
+      fetchUrl(
+        `${SM_BASE}/standings/seasons/${seasonId}?api_token=${SM_TOKEN}` +
+          `&include=rule.type;stage;participant;details.type;form;league;group`,
+      ),
+      fetchUrl(
+        `${SM_BASE}/teams/seasons/${seasonId}?api_token=${SM_TOKEN}` +
+          `&include=sidelined.player;sidelined.type;statistics.details.type;players.player;players.detailedPosition;players.position` +
+          `&filters=teamstatisticSeasons:${seasonId}`,
+      ),
+      fetchUrl(
+        `${SM_BASE}/leagues/${leagueId}?api_token=${SM_TOKEN}` +
+          `&include=currentSeason;country;latest.round;latest.aggregate;latest.scores;latest.participants;latest.venue;upcoming.round;upcoming.aggregate;upcoming.participants;upcoming.venue&timezone=America/Toronto`,
+      ),
+      stageId
+        ? fetchUrl(
+            `${SM_BASE}/statistics/stages/${stageId}?api_token=${SM_TOKEN}` +
+              `&include=type;participant`,
+          )
+        : Promise.resolve(null),
+      fetchUrl(
+        `${SM_BASE}/team-of-the-week/leagues/${leagueId}/latest?api_token=${SM_TOKEN}` +
+          `&include=player.country;team;round`,
+      )
+        .then((data) =>
+          data?.message === "The requested endpoint does not exist"
+            ? null
+            : data,
+        )
+        .catch((err) => {
+          console.error(
+            `Team of the Week failed for league ${leagueId}:`,
+            err.response?.status,
+            err.response?.data || err.message,
+          );
+          return null;
+        }),
+    ]);
 
-    const combined = {
-      standings,
-      teamsInSeason,
-      leagueInfo,
-      stageStats,
-      teamOfTheWeek,
-    };
-    cacheSet(cacheKey, combined);
+  const combined = {
+    standings,
+    teamsInSeason,
+    leagueInfo,
+    stageStats,
+    ...(teamOfTheWeek ? { teamOfTheWeek } : {}),
+  };
 
-    setCacheControl(res, TTL_1H);
-    res.json({ source: "origin", data: transformLeagueResponse(combined) });
-  } catch (err) {
-    res
-      .status(502)
-      .json({ error: "Failed to fetch league data", details: err.message });
-  }
+  cacheSet(cacheKey, combined);
+
+  setCacheControl(res, TTL_1H);
+  res.json({ source: "origin", data: transformLeagueResponse(combined) });
+} catch (err) {
+  console.error("League endpoint error:", {
+    status: err.response?.status,
+    data: err.response?.data,
+    message: err.message,
+  });
+
+  res.status(502).json({
+    error: "Failed to fetch league data",
+    details: err.message,
+    upstreamStatus: err.response?.status,
+  });
+}
 });
 
 // Transforms combined team data per a–d.txt specs.
@@ -3018,6 +3040,48 @@ app.get("/football/game/facts/:fixtureId", async (req, res) => {
 //   - finished (FT)                    → 12 h
 // Activity-based polling stops after 60 s of no incoming requests and
 // restarts on the next request.
+
+async function fetchFixtureWithFallback(baseUrl, includes) {
+  let activeIncludes = [...includes];
+
+  while (activeIncludes.length > 0) {
+    try {
+      const url =
+        `${baseUrl}&include=${activeIncludes.join(";")}`;
+
+      return await fetchUrl(url);
+    } catch (err) {
+      const data = err.response?.data;
+
+      if (data?.code !== 5002) {
+        throw err;
+      }
+
+      const match = data.message?.match(
+        /'([^']+)' include/i,
+      );
+
+      if (!match) {
+        throw err;
+      }
+
+      const blockedInclude = match[1].toLowerCase();
+
+      console.warn(
+        `Removing inaccessible include: ${blockedInclude}`,
+      );
+
+      activeIncludes = activeIncludes.filter(
+        (i) => i.toLowerCase() !== blockedInclude,
+      );
+
+      if (activeIncludes.length === 0) {
+        throw err;
+      }
+    }
+  }
+}
+
 app.get("/football/game/:fixtureId/:team1/:team2", async (req, res) => {
   const { fixtureId } = req.params;
   const fixtureCacheKey = `game:${fixtureId}`;
@@ -3056,7 +3120,38 @@ app.get("/football/game/:fixtureId/:team1/:team2", async (req, res) => {
   }
 
   try {
-    const freshFixture = await fetchUrl(fixtureUrl);
+    const includes = [
+  "state",
+  "aggregate",
+  "round",
+  "periods",
+  "participants",
+  "scores",
+  "league.country",
+  "comments",
+  "formations",
+  "venue",
+  "weatherReport",
+  "events",
+  "statistics.type",
+  "formations",
+  "sidelined.player",
+  "sidelined.type",
+  "sidelined.sideline",
+  "lineups.player",
+  "lineups.type",
+  "lineups.position",
+  "lineups.detailedPosition",
+  "coaches",
+  "referees.referee",
+  "lineups.details.type",
+  "ballCoordinates",
+];
+
+const freshFixture = await fetchFixtureWithFallback(
+  `${SM_BASE}/fixtures/${fixtureId}?api_token=${SM_TOKEN}&timezone=America/Toronto`,
+  includes,
+);
 
     cacheSet(fixtureCacheKey, freshFixture);
 
