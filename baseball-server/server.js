@@ -1405,8 +1405,7 @@ function buildMlbLiveActivityProps(game, baseProps = null) {
       ...baseHome,
       id: homeTeam?.id || null,
       name: homeTeam?.name || "Home",
-      shortName:
-        getTeamAbbr(homeTeam),
+      shortName: getTeamAbbr(homeTeam),
       score: homeScore,
       winner: homeWinner,
       logo: baseHome?.logo ?? null,
@@ -1416,8 +1415,7 @@ function buildMlbLiveActivityProps(game, baseProps = null) {
       ...baseAway,
       id: awayTeam?.id || null,
       name: awayTeam?.name || "Away",
-      shortName:
-        getTeamAbbr(awayTeam),
+      shortName: getTeamAbbr(awayTeam),
       score: awayScore,
       winner: awayWinner,
       logo: baseAway?.logo ?? null,
@@ -1494,34 +1492,30 @@ function buildMlbLiveActivityStartAlert(payload) {
   };
 }
 
-function buildMlbLiveActivityScoreAlert(previousScoreSnapshot, nextProps) {
-  const nextDescription = String(
-    nextProps?.previousPlayDescription || "",
-  ).trim();
-  const nextScoreSnapshot = {
-    away: Number(nextProps?.away?.score ?? 0),
-    home: Number(nextProps?.home?.score ?? 0),
-  };
+function buildMlbLiveActivityScoreAlert(lastAlertedPlay, nextProps) {
+  const description = String(nextProps?.previousPlayDescription || "").trim();
 
-  if (!nextDescription) {
-    return { alert: null, nextScoreSnapshot };
+  if (!description) {
+    return { alert: null, scoringPlayKey: null };
   }
 
-  if (previousScoreSnapshot === nextDescription) {
-    return { alert: null, nextScoreSnapshot };
+  if (!/(scores|homers)/i.test(description)) {
+    return { alert: null, scoringPlayKey: null };
   }
 
-  if (!/(scores|homers)/i.test(nextDescription)) {
-    return { alert: null, nextScoreSnapshot };
+  const scoringPlayKey = description;
+
+  if (lastAlertedPlay === scoringPlayKey) {
+    return { alert: null, scoringPlayKey };
   }
 
   return {
     alert: {
       title: "Scoring Play",
-      body: nextDescription,
+      body: description,
       sound: "default",
     },
-    nextScoreSnapshot,
+    scoringPlayKey,
   };
 }
 
@@ -1654,10 +1648,14 @@ async function pushMlbLiveActivityUpdate(game) {
   const baseProps = liveActivityBaseProps.get(gamePk) || null;
   const nextProps = buildMlbLiveActivityProps(game, baseProps);
   const previousDescription = gameState.lastPreviousPlayDescription || "";
-  const { alert, nextScoreSnapshot } = buildMlbLiveActivityScoreAlert(
-    previousDescription,
+  const { alert, scoringPlayKey } = buildMlbLiveActivityScoreAlert(
+    gameState.lastAlertedScoringPlay,
     nextProps,
   );
+
+  if (alert) {
+    gameState.lastAlertedScoringPlay = scoringPlayKey;
+  }
   liveActivityBaseProps.set(gamePk, nextProps);
   gameState.lastScoreSnapshot = nextScoreSnapshot;
   gameState.lastPreviousPlayDescription = String(
