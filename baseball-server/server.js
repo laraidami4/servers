@@ -1609,6 +1609,18 @@ async function sendMlbLiveActivityEnd(gamePk, props) {
     dismissalMs: MLB_LIVE_ACTIVITY_DISMISSAL_MS,
   });
 
+  // mark game state to suppress further updates for a short dismissal window
+  try {
+    const gameState = ensureGameState(gamePk, { gamePk });
+    gameState.suppressUntilMs = Date.now() + MLB_LIVE_ACTIVITY_DISMISSAL_MS;
+    gameState.didSendDismissalEnd = true;
+  } catch (e) {
+    logMlbLiveActivity("end-mark-suppress-failed", {
+      gamePk,
+      error: e?.message || String(e),
+    });
+  }
+
   clearLiveActivityTracking(gamePk);
   return { sent: true, tokenCount: tokens.length, forwarded };
 }
@@ -1621,6 +1633,17 @@ async function pushMlbLiveActivityUpdate(game) {
   if (tokens.length === 0) return { sent: false, reason: "no-tokens" };
 
   const gameState = ensureGameState(gamePk, game);
+  if (
+    gameState &&
+    gameState.suppressUntilMs &&
+    Date.now() < Number(gameState.suppressUntilMs || 0)
+  ) {
+    logMlbLiveActivity("update-suppressed", {
+      gamePk,
+      suppressUntilMs: gameState.suppressUntilMs,
+    });
+    return { sent: false, reason: "suppressed", tokenCount: tokens.length };
+  }
   const signature = buildMlbLiveActivitySignature(game);
   if (gameState.lastLiveActivitySignature === signature) {
     return { sent: false, reason: "unchanged", tokenCount: tokens.length };
