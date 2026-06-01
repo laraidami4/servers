@@ -1169,8 +1169,6 @@ function buildMlbLiveActivityProps(game, baseProps = null) {
   const previousPlayData = getMlbLiveActivityPreviousPlayData(game);
   const offenseTeamId = previousPlayData.teamIds.offense;
   const defenseTeamId = previousPlayData.teamIds.defense;
-  const offenseBaseState = linescore?.offense || null;
-  const previousBases = baseProps?.bases || baseProps?.status?.bases || null;
   const resolveBaseValue = (baseName) => {
     if (!offenseBaseState) {
       return previousBases?.[baseName] ?? false;
