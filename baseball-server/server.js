@@ -1594,7 +1594,7 @@ async function pushMlbLiveActivityStart({ fixtureId, bundleId, payload }) {
       event: "start",
       timestamp: Math.floor(Date.now() / 1000),
       "attributes-type": "LiveActivityAttributes",
-      attributes: { 
+      attributes: {
         gamePk: fixtureKey,
       },
       "input-push-token": 1,
@@ -5390,10 +5390,10 @@ app.post("/live-activity/start", async (req, res) => {
     });
 
     console.log("START", {
-      fixtureKey,
-      fixtureTokens,
-      bundleTokens,
-      tokens,
+      key,
+      currentFixtureTokens,
+      currentBundleTokens,
+      currentTokens,
     });
 
     if (!result.sent) {
