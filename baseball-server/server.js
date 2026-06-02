@@ -405,7 +405,7 @@ async function addPushToStartToken(bundleId, token) {
     tokens = new Set();
     pushToStartTokens.set(bundleKey, tokens);
   }
-  tokens.clear();
+  // Don't clear - we want to support multiple simultaneous live activities
   tokens.add(tokenKey);
 
   if (supabaseAdmin) {
@@ -453,7 +453,7 @@ async function addFixturePushToStartToken(fixtureId, token) {
     tokens = new Set();
     fixturePushToStartTokens.set(fixtureKey, tokens);
   }
-  tokens.clear();
+  // Don't clear - we want to support multiple simultaneous live activities
   tokens.add(tokenKey);
 
   if (supabaseAdmin) {
