@@ -1493,6 +1493,12 @@ async function pushMlbLiveActivityUpdate(game) {
   if (!gamePk) return { sent: false, reason: "missing-gamePk" };
 
   const tokens = getLiveActivityTokensForGame(gamePk);
+
+  console.log("UPDATE TOKENS", {
+    gamePk,
+    tokenCount: tokens.length,
+    tokens,
+  });
   if (tokens.length === 0) return { sent: false, reason: "no-tokens" };
 
   const gameState = ensureGameState(gamePk, game);
@@ -1507,15 +1513,6 @@ async function pushMlbLiveActivityUpdate(game) {
   const signatureLinescore =
     game?.linescore || game?.liveData?.linescore || game?.live?.linescore || {};
 
-  logMlbLiveActivity("signature-debug", {
-    gamePk,
-    offensePresent: !!signatureLinescore?.offense,
-    first: signatureLinescore?.offense?.first?.id,
-    second: signatureLinescore?.offense?.second?.id,
-    third: signatureLinescore?.offense?.third?.id,
-    batter: signatureLinescore?.offense?.batter?.fullName,
-  });
-
   const signature = buildMlbLiveActivitySignature(game);
   if (gameState.lastLiveActivitySignature === signature) {
     return { sent: false, reason: "unchanged", tokenCount: tokens.length };
@@ -1527,12 +1524,6 @@ async function pushMlbLiveActivityUpdate(game) {
 
   const debugLinescore =
     game?.linescore || game?.liveData?.linescore || game?.live?.linescore || {};
-
-  logMlbLiveActivity("bases-debug", {
-    gamePk,
-    offense: debugLinescore?.offense,
-    bases: nextProps?.bases,
-  });
 
   const nextScoreSnapshot = {
     away: Number(nextProps?.away?.score ?? 0),
@@ -5317,6 +5308,8 @@ app.post("/live-activity/register-activity-token", async (req, res) => {
 
     console.log({
       gamePk,
+      fixtureId,
+      key,
       token,
     });
 
