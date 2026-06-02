@@ -1594,7 +1594,9 @@ async function pushMlbLiveActivityStart({ fixtureId, bundleId, payload }) {
       event: "start",
       timestamp: Math.floor(Date.now() / 1000),
       "attributes-type": "LiveActivityAttributes",
-      attributes: {},
+      attributes: { 
+        gamePk: fixtureKey,
+      },
       "input-push-token": 1,
       alert: buildMlbLiveActivityStartAlert(payload),
       "content-state": buildLiveActivityContentState(payload),
@@ -5313,6 +5315,11 @@ app.post("/live-activity/register-activity-token", async (req, res) => {
       liveActivityBaseProps.set(key, req.body.props);
     }
 
+    console.log({
+      gamePk,
+      token,
+    });
+
     return res.json({ ok: true, tokenCount: 1 });
   } catch (err) {
     return res.status(500).json({ error: err.message });
@@ -5380,6 +5387,13 @@ app.post("/live-activity/start", async (req, res) => {
       fixtureId: key,
       bundleId: bundleId || APPLE_BUNDLE_ID,
       payload,
+    });
+
+    console.log("START", {
+      fixtureKey,
+      fixtureTokens,
+      bundleTokens,
+      tokens,
     });
 
     if (!result.sent) {
