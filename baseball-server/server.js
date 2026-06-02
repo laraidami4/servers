@@ -1493,12 +1493,6 @@ async function pushMlbLiveActivityUpdate(game) {
   if (!gamePk) return { sent: false, reason: "missing-gamePk" };
 
   const tokens = getLiveActivityTokensForGame(gamePk);
-
-  console.log("UPDATE TOKENS", {
-    gamePk,
-    tokenCount: tokens.length,
-    tokens,
-  });
   if (tokens.length === 0) return { sent: false, reason: "no-tokens" };
 
   const gameState = ensureGameState(gamePk, game);
