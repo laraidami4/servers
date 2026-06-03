@@ -548,8 +548,23 @@ async function getPushToStartTokensForFixture(fixtureId) {
 function getLiveActivityTokensForGame(gamePk) {
   const key = String(gamePk || "").trim();
   if (!key) return [];
-  const tokens = Array.from(liveActivityTokens.get(key) || []);
-  return tokens;
+
+  const tokens = liveActivityTokens.get(key);
+  if (!tokens) return [];
+
+  const activeTokens = Array.from(tokens).filter(
+    (t) => liveActivityTokenOwners.get(t) === key,
+  );
+
+  // Clean up orphaned tokens
+  const validTokens = activeTokens.filter(
+    (t) => t && typeof t === "string" && t.trim().length > 0,
+  );
+
+  // Update the set to only include valid tokens
+  liveActivityTokens.set(key, new Set(validTokens));
+
+  return validTokens;
 }
 
 function formatStartingAt(dateTime) {
@@ -1639,19 +1654,72 @@ async function processMlbLiveActivityTick() {
     try {
       const gamePk = String(game?.gamePk || "");
       if (!gamePk) continue;
+
       const tokens = getLiveActivityTokensForGame(gamePk);
-      if (tokens.length === 0) continue;
+      if (tokens.length === 0) {
+        logMlbLiveActivity("skip-update-no-tokens", { gamePk });
+        continue;
+      }
 
       const liveGame = (await fetchMlbGameForLiveActivity(gamePk)) || game;
 
       const state = ensureGameState(gamePk, liveGame);
-      const signature = buildMlbLiveActivitySignature(liveGame);
-      const shouldSend = state.lastLiveActivitySignature !== signature;
-
-      if (shouldSend) {
-        await pushMlbLiveActivityUpdate(liveGame);
+      if (state.suppressUntilMs && Date.now() < state.suppressUntilMs) {
+        logMlbLiveActivity("skip-suppressed", { gamePk });
+        continue;
       }
-    } catch (error) {}
+
+      const signature = buildMlbLiveActivitySignature(liveGame);
+      if (state.lastLiveActivitySignature === signature) {
+        logMlbLiveActivity("skip-unchanged", { gamePk });
+        continue;
+      }
+
+      state.lastLiveActivitySignature = signature;
+      const baseProps = liveActivityBaseProps.get(gamePk) || null;
+      const nextProps = buildMlbLiveActivityProps(liveGame, baseProps);
+
+      const { alert, scoringPlayKey } = buildMlbLiveActivityScoreAlert(
+        state.lastAlertedScoringPlay,
+        nextProps,
+      );
+
+      if (alert) {
+        state.lastAlertedScoringPlay = scoringPlayKey;
+      }
+
+      liveActivityBaseProps.set(gamePk, nextProps);
+
+      const payload = {
+        aps: {
+          event: "update",
+          "content-state": buildLiveActivityContentState(nextProps),
+          timestamp: Math.floor(Date.now() / 1000),
+          ...(alert ? { alert } : {}),
+        },
+      };
+
+      logMlbLiveActivity("sending-update", {
+        gamePk,
+        tokenCount: tokens.length,
+        signature: signature.substring(0, 50) + "...",
+      });
+
+      const forwarded = await forwardToProvider(tokens, payload);
+
+      // Handle completion
+      if (isMlbLiveActivityFinished(liveGame) && !state.didSendDismissalEnd) {
+        const endResult = await sendMlbLiveActivityEnd(gamePk, nextProps);
+        if (endResult?.sent) {
+          state.didSendDismissalEnd = true;
+        }
+      }
+    } catch (error) {
+      logMlbLiveActivity("live-activity-error", {
+        error: error?.message || String(error),
+        gamePk,
+      });
+    }
   }
 }
 
@@ -5289,9 +5357,15 @@ app.post("/live-activity/register-activity-token", async (req, res) => {
         .json({ error: "gamePk/fixtureId and token required" });
     }
 
+    logMlbLiveActivity("register-token", {
+      gamePk: key,
+      token: maskToken(tokenKey),
+    });
+
+    // Handle token migration from other games
     const previousOwner = liveActivityTokenOwners.get(tokenKey) || null;
     if (previousOwner && previousOwner !== key) {
-      // CHANGED: Remove only this specific token from the previous game's set
+      // Remove from previous game's set
       const prevTokens = liveActivityTokens.get(previousOwner);
       if (prevTokens) {
         prevTokens.delete(tokenKey);
@@ -5301,31 +5375,38 @@ app.post("/live-activity/register-activity-token", async (req, res) => {
       }
     }
 
-    // CHANGED: Add token to the new game's set (don't replace entire set)
+    // Add to new game
     let tokens = liveActivityTokens.get(key);
     if (!tokens) {
       tokens = new Set();
       liveActivityTokens.set(key, tokens);
     }
     tokens.add(tokenKey);
-
     liveActivityTokenOwners.set(tokenKey, key);
 
+    // Update base props if provided
     if (req.body?.props) {
       liveActivityBaseProps.set(key, req.body.props);
     }
 
-    logMlbActivity("register-activity-token:success", {
-      gamePk,
-      fixtureId,
-      key,
-      token: maskToken(tokenKey),
-      previousOwner,
-      currentTokenCount: tokens.size,
+    logMlbLiveActivity("token registered", {
+      gamePk: key,
+      tokenCount: tokens.size,
+      serverKeyCount: liveActivityTokens.size,
     });
 
-    return res.json({ ok: true, tokenCount: tokens.size });
+    // Keep game state active
+    const gameState = ensureGameState(key);
+    gameState.suppressUntilMs = 0;
+    gameState.didSendDismissalEnd = false;
+
+    return res.json({
+      ok: true,
+      tokenCount: tokens.size,
+      gamePk: key,
+    });
   } catch (err) {
+    console.error("register-activity-token error:", err);
     return res.status(500).json({ error: err.message });
   }
 });
