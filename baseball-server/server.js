@@ -365,6 +365,7 @@ function removeLiveActivityToken(token) {
     liveActivityTokenOwners.delete(key);
   }
 
+  // Also check all games for this token
   for (const [gamePk, tokens] of liveActivityTokens.entries()) {
     if (!tokens.has(key)) continue;
     tokens.delete(key);
@@ -381,15 +382,31 @@ function clearLiveActivityTracking(gamePk) {
   if (!key) return { tokenCount: 0 };
 
   const tokens = Array.from(liveActivityTokens.get(key) || []);
-  for (const token of tokens) {
-    liveActivityTokenOwners.delete(token);
-  }
+
+  // Remove from memory
   liveActivityTokens.delete(key);
   liveActivityBaseProps.delete(key);
+
   const gameState = mlbNotifState.gameStates.get(key) || null;
   if (gameState) {
     gameState.lastLiveActivitySignature = null;
     gameState.lastPreviousPlayDescription = null;
+  }
+
+  // Remove from Supabase
+  if (supabaseAdmin) {
+    supabaseAdmin
+      .from("live_activity_tokens")
+      .delete()
+      .eq("fixture_id", key)
+      .then(({ error }) => {
+        if (error) {
+          console.warn(
+            "[baseball live-activity] supabase delete fixture tokens failed:",
+            error?.message || error,
+          );
+        }
+      });
   }
 
   return { tokenCount: tokens.length };
@@ -460,27 +477,28 @@ async function addFixturePushToStartToken(fixtureId, token) {
 
   if (supabaseAdmin) {
     try {
-      // Always insert - don't worry about conflicts since we want multiple rows
-      await supabaseAdmin.from("live_activity_tokens").insert({
-        type: "fixture",
-        bundle_id: null,
-        token: tokenKey,
-        fixture_id: fixtureKey,
-      });
+      // Insert new row for this fixture and token combination
+      const { error } = await supabaseAdmin
+        .from("live_activity_tokens")
+        .insert({
+          type: "fixture",
+          bundle_id: null,
+          token: tokenKey,
+          fixture_id: fixtureKey,
+        });
 
-      return true;
-    } catch (e) {
-      // Ignore ONLY duplicate key errors
-      const errorMessage = e?.message || String(e);
-      if (
-        !errorMessage.includes("23505") &&
-        !errorMessage.includes("duplicate")
-      ) {
+      if (error) {
         console.warn(
           "[baseball live-activity] supabase insert fixture token failed:",
-          errorMessage,
+          error?.message || error,
         );
       }
+      return true;
+    } catch (e) {
+      console.warn(
+        "[baseball live-activity] supabase insert fixture token failed:",
+        e?.message || String(e),
+      );
       return true;
     }
   }
