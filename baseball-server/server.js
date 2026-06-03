@@ -409,54 +409,30 @@ async function addPushToStartToken(bundleId, token) {
 
   if (supabaseAdmin) {
     try {
-      // CHANGED: Check if token exists first
-      const { data: existing, error: fetchError } = await supabaseAdmin
-        .from("live_activity_tokens")
-        .select("*")
-        .eq("token", tokenKey)
-        .maybeSingle();
+      // CHANGED: Use the correct composite constraint
+      const { error } = await supabaseAdmin.from("live_activity_tokens").upsert(
+        {
+          type: "bundle",
+          bundle_id: bundleKey,
+          token: tokenKey,
+          fixture_id: null,
+        },
+        {
+          onConflict: "type,token", // This matches your constraint
+        },
+      );
 
-      if (fetchError) {
+      if (error) {
         console.warn(
-          "[baseball] fetch existing token error:",
-          fetchError?.message,
-        );
-      }
-
-      let dbResult;
-      if (existing) {
-        // Update existing record
-        dbResult = await supabaseAdmin
-          .from("live_activity_tokens")
-          .update({
-            type: "bundle",
-            bundle_id: bundleKey,
-            fixture_id: null,
-          })
-          .eq("token", tokenKey);
-      } else {
-        // Insert new record
-        dbResult = await supabaseAdmin.from("live_activity_tokens").insert([
-          {
-            type: "bundle",
-            bundle_id: bundleKey,
-            token: tokenKey,
-            fixture_id: null,
-          },
-        ]);
-      }
-
-      if (dbResult.error) {
-        console.warn(
-          "[baseball live-activity] supabase operation error:",
-          dbResult.error?.message || dbResult.error,
+          "[baseball live-activity] supabase upsert bundle token error:",
+          error?.message || error,
         );
       } else {
         return true;
       }
     } catch (e) {
       console.warn(
-        "[baseball live-activity] supabase operation failed:",
+        "[baseball live-activity] supabase upsert bundle token failed:",
         e?.message || e,
       );
     }
@@ -478,7 +454,7 @@ async function addFixturePushToStartToken(fixtureId, token) {
 
   if (supabaseAdmin) {
     try {
-      // CHANGED: Use upsert with proper conflict resolution
+      // CHANGED: Use the correct composite constraint
       const { error } = await supabaseAdmin.from("live_activity_tokens").upsert(
         {
           type: "fixture",
@@ -487,9 +463,10 @@ async function addFixturePushToStartToken(fixtureId, token) {
           fixture_id: fixtureKey,
         },
         {
-          onConflict: "token",
+          onConflict: "type,token", // This matches your constraint
         },
       );
+
       if (error) {
         console.warn(
           "[baseball live-activity] supabase upsert fixture token error:",
@@ -503,34 +480,6 @@ async function addFixturePushToStartToken(fixtureId, token) {
         "[baseball live-activity] supabase upsert fixture token failed:",
         e?.message || e,
       );
-
-      // Fallback: Try insert or ignore
-      try {
-        await supabaseAdmin
-          .from("live_activity_tokens")
-          .insert([
-            {
-              type: "fixture",
-              bundle_id: null,
-              token: tokenKey,
-              fixture_id: fixtureKey,
-            },
-          ])
-          .then(({ error }) => {
-            if (error && error.code !== "23505") {
-              console.warn(
-                "[baseball] fixture insert fallback error:",
-                error?.message,
-              );
-            }
-          });
-        return true;
-      } catch (fallbackError) {
-        console.warn(
-          "[baseball] fixture insert fallback also failed:",
-          fallbackError?.message,
-        );
-      }
     }
   }
   return true;
