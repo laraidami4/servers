@@ -395,53 +395,6 @@ function clearLiveActivityTracking(gamePk) {
   return { tokenCount: tokens.length };
 }
 
-async function addPushToStartToken(bundleId, token) {
-  const bundleKey = String(bundleId || "").trim();
-  const tokenKey = String(token || "").trim();
-  if (!bundleKey || !tokenKey) return false;
-
-  let tokens = pushToStartTokens.get(bundleKey);
-  if (!tokens) {
-    tokens = new Set();
-    pushToStartTokens.set(bundleKey, tokens);
-  }
-  tokens.add(tokenKey);
-
-  if (supabaseAdmin) {
-    try {
-      // CHANGED: Insert directly without deleting first
-      const { error } = await supabaseAdmin
-        .from("live_activity_tokens")
-        .insert([
-          {
-            type: "bundle",
-            bundle_id: bundleKey,
-            token: tokenKey,
-            fixture_id: null,
-          },
-        ])
-        .select();
-
-      if (error) {
-        // If insert fails due to duplicate, that's fine
-        if (error.code !== "23505") {
-          console.warn(
-            "[baseball live-activity] supabase insert bundle token error:",
-            error?.message || error,
-          );
-        }
-      }
-      return true;
-    } catch (e) {
-      console.warn(
-        "[baseball live-activity] supabase insert bundle token failed:",
-        e?.message || e,
-      );
-    }
-  }
-  return true;
-}
-
 async function addFixturePushToStartToken(fixtureId, token) {
   const fixtureKey = String(fixtureId || "").trim();
   const tokenKey = String(token || "").trim();
@@ -456,27 +409,38 @@ async function addFixturePushToStartToken(fixtureId, token) {
 
   if (supabaseAdmin) {
     try {
-      // Simple insert - don't worry about conflicts
-      await supabaseAdmin.from("live_activity_tokens").insert({
-        type: "fixture",
-        bundle_id: null,
-        token: tokenKey,
-        fixture_id: fixtureKey,
-      });
+      // Use insert with conflict resolution - don't delete anything!
+      const { error } = await supabaseAdmin
+        .from("live_activity_tokens")
+        .insert({
+          type: "fixture",
+          bundle_id: null,
+          token: tokenKey,
+          fixture_id: fixtureKey,
+        })
+        .select();
+
+      // Ignore duplicate key errors - that's expected
+      if (error && error.code !== "23505") {
+        console.warn(
+          "[baseball live-activity] supabase insert fixture token error:",
+          error?.message || error,
+        );
+      }
       return true;
     } catch (e) {
-      // Ignore duplicate insert errors - token already exists
       const errorMessage = e?.message || String(e);
+      // Ignore duplicate key errors
       if (
         !errorMessage.includes("23505") &&
         !errorMessage.includes("duplicate")
       ) {
         console.warn(
-          "[baseball live-activity] supabase insert fixture token warning:",
+          "[baseball live-activity] supabase insert fixture token failed:",
           errorMessage,
         );
       }
-      return true; // Still return true even if duplicate
+      return true; // Still succeed even with duplicate
     }
   }
   return true;
@@ -496,38 +460,86 @@ async function addPushToStartToken(bundleId, token) {
 
   if (supabaseAdmin) {
     try {
-      // Simple insert - don't worry about conflicts
-      await supabaseAdmin.from("live_activity_tokens").insert({
-        type: "bundle",
-        bundle_id: bundleKey,
-        token: tokenKey,
-        fixture_id: null,
-      });
+      // Use insert with conflict resolution - don't delete anything!
+      const { error } = await supabaseAdmin
+        .from("live_activity_tokens")
+        .insert({
+          type: "bundle",
+          bundle_id: bundleKey,
+          token: tokenKey,
+          fixture_id: null,
+        })
+        .select();
+
+      // Ignore duplicate key errors - that's expected
+      if (error && error.code !== "23505") {
+        console.warn(
+          "[baseball live-activity] supabase insert bundle token error:",
+          error?.message || error,
+        );
+      }
       return true;
     } catch (e) {
-      // Ignore duplicate insert errors
       const errorMessage = e?.message || String(e);
+      // Ignore duplicate key errors
       if (
         !errorMessage.includes("23505") &&
         !errorMessage.includes("duplicate")
       ) {
         console.warn(
-          "[baseball live-activity] supabase insert bundle token warning:",
+          "[baseball live-activity] supabase insert bundle token failed:",
           errorMessage,
         );
       }
-      return true; // Still return true
+      return true; // Still succeed even with duplicate
     }
   }
   return true;
 }
 
+async function getPushToStartTokensForBundle(bundleId) {
+  const bundleKey = String(bundleId || "").trim();
+  if (!bundleKey) return [];
+
+  // Check in-memory cache first
+  const cachedTokens = Array.from(pushToStartTokens.get(bundleKey) || []);
+
+  if (supabaseAdmin) {
+    try {
+      const { data, error } = await supabaseAdmin
+        .from("live_activity_tokens")
+        .select("token")
+        .eq("bundle_id", bundleKey)
+        .eq("type", "bundle");
+
+      if (!error && Array.isArray(data)) {
+        const dbTokens = data
+          .map((row) => String(row.token || "").trim())
+          .filter(Boolean);
+        // Merge cached and database tokens, remove duplicates
+        const merged = Array.from(new Set([...cachedTokens, ...dbTokens]));
+        return merged;
+      }
+    } catch (e) {
+      console.warn(
+        "[baseball live-activity] supabase select bundle tokens failed:",
+        e?.message || e,
+      );
+    }
+  }
+
+  return cachedTokens;
+}
+
 async function getPushToStartTokensForFixture(fixtureId) {
   const fixtureKey = String(fixtureId || "").trim();
   if (!fixtureKey) return [];
-  const fallbackTokens = Array.from(
+
+  // Check in-memory cache first
+  const cachedTokens = Array.from(
     fixturePushToStartTokens.get(fixtureKey) || [],
   );
+
   if (supabaseAdmin) {
     try {
       const { data, error } = await supabaseAdmin
@@ -535,11 +547,13 @@ async function getPushToStartTokensForFixture(fixtureId) {
         .select("token")
         .eq("fixture_id", fixtureKey)
         .eq("type", "fixture");
-      if (!error) {
-        const dbTokens = (data || [])
-          .map((row) => String(row?.token || "").trim())
+
+      if (!error && Array.isArray(data)) {
+        const dbTokens = data
+          .map((row) => String(row.token || "").trim())
           .filter(Boolean);
-        const merged = Array.from(new Set([...fallbackTokens, ...dbTokens]));
+        // Merge cached and database tokens, remove duplicates
+        const merged = Array.from(new Set([...cachedTokens, ...dbTokens]));
         return merged;
       }
     } catch (e) {
@@ -549,7 +563,8 @@ async function getPushToStartTokensForFixture(fixtureId) {
       );
     }
   }
-  return fallbackTokens;
+
+  return cachedTokens;
 }
 
 function getLiveActivityTokensForGame(gamePk) {
