@@ -409,31 +409,38 @@ async function addPushToStartToken(bundleId, token) {
 
   if (supabaseAdmin) {
     try {
-      // Use upsert with your existing constraint
-      const { error } = await supabaseAdmin.from("live_activity_tokens").upsert(
-        {
+      // Use insert - ignore duplicates
+      const { error } = await supabaseAdmin
+        .from("live_activity_tokens")
+        .insert({
           type: "bundle",
           bundle_id: bundleKey,
           token: tokenKey,
           fixture_id: null,
-        },
-        {
-          onConflict: "type, token, fixture_id, bundle_id",
-        },
-      );
+        });
 
-      if (error) {
+      // Ignore duplicate key errors - that's expected behavior
+      if (error && error.code !== "23505") {
+        // 23505 = unique violation
         console.warn(
-          "[baseball live-activity] supabase upsert bundle token error:",
+          "[baseball live-activity] supabase insert bundle token error:",
           error?.message || error,
         );
       }
       return true;
     } catch (e) {
-      console.warn(
-        "[baseball live-activity] supabase upsert bundle token failed:",
-        e?.message || e,
-      );
+      // Still return true for duplicate errors
+      const errorMessage = e?.message || String(e);
+      if (
+        !errorMessage.includes("23505") &&
+        !errorMessage.includes("duplicate")
+      ) {
+        console.warn(
+          "[baseball live-activity] supabase insert bundle token failed:",
+          errorMessage,
+        );
+      }
+      return true;
     }
   }
   return true;
@@ -453,31 +460,37 @@ async function addFixturePushToStartToken(fixtureId, token) {
 
   if (supabaseAdmin) {
     try {
-      // Use upsert with your existing constraint
-      const { error } = await supabaseAdmin.from("live_activity_tokens").upsert(
-        {
+      // Use insert - ignore duplicates
+      const { error } = await supabaseAdmin
+        .from("live_activity_tokens")
+        .insert({
           type: "fixture",
           bundle_id: null,
           token: tokenKey,
           fixture_id: fixtureKey,
-        },
-        {
-          onConflict: "type, token, fixture_id, bundle_id",
-        },
-      );
+        });
 
-      if (error) {
+      // Ignore duplicate key errors
+      if (error && error.code !== "23505") {
         console.warn(
-          "[baseball live-activity] supabase upsert fixture token error:",
+          "[baseball live-activity] supabase insert fixture token error:",
           error?.message || error,
         );
       }
       return true;
     } catch (e) {
-      console.warn(
-        "[baseball live-activity] supabase upsert fixture token failed:",
-        e?.message || e,
-      );
+      // Still return true for duplicate errors
+      const errorMessage = e?.message || String(e);
+      if (
+        !errorMessage.includes("23505") &&
+        !errorMessage.includes("duplicate")
+      ) {
+        console.warn(
+          "[baseball live-activity] supabase insert fixture token failed:",
+          errorMessage,
+        );
+      }
+      return true;
     }
   }
   return true;
