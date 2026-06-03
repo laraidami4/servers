@@ -1236,11 +1236,15 @@ function buildMlbLiveActivityProps(game, baseProps = null) {
     if (previousColor && previousColor !== "#888888") return previousColor;
     return resolvedColor || previousColor || "#888888";
   };
+  const now = Date.now();
+  const nanoTime = now * 1000 + Math.floor(Math.random() * 1000);
 
   return {
     gamePk,
     id: gamePk,
     sport: "mlb",
+    _timestamp: now,
+    _updateId: nanoTime,
     url: baseUrl || `sportsheart://mlb/game/${gamePk}`,
     startingAt: formatStartingAt(gameDate),
     status: {
@@ -1489,67 +1493,53 @@ async function pushMlbLiveActivityUpdate(game) {
   if (tokens.length === 0) return { sent: false, reason: "no-tokens" };
 
   const gameState = ensureGameState(gamePk, game);
-  if (
-    gameState &&
-    gameState.suppressUntilMs &&
-    Date.now() < Number(gameState.suppressUntilMs || 0)
-  ) {
+  if (gameState.suppressUntilMs && Date.now() < gameState.suppressUntilMs) {
     return { sent: false, reason: "suppressed", tokenCount: tokens.length };
   }
 
-  const signatureLinescore =
-    game?.linescore || game?.liveData?.linescore || game?.live?.linescore || {};
-
   const signature = buildMlbLiveActivitySignature(game);
-  if (gameState.lastLiveActivitySignature === signature) {
-    return { sent: false, reason: "unchanged", tokenCount: tokens.length };
+
+  // Allow updates even if signature appears unchanged
+  const forceUpdate = gameState.forceUpdate || false;
+  const shouldSendUpdate =
+    gameState.lastLiveActivitySignature !== signature ||
+    forceUpdate ||
+    Date.now() - (gameState.lastUpdateSent || 0) > 30000;
+
+  if (shouldSendUpdate) {
+    gameState.lastLiveActivitySignature = signature;
+    gameState.lastUpdateSent = Date.now();
+
+    const baseProps = liveActivityBaseProps.get(gamePk) || null;
+    const nextProps = buildMlbLiveActivityProps(game, baseProps);
+
+    // Force new content
+    nextProps._updateToken = `${Date.now()}-${Math.random()}`;
+
+    liveActivityBaseProps.set(gamePk, nextProps);
+
+    const payload = {
+      aps: {
+        event: "update",
+        "content-state": buildLiveActivityContentState(nextProps),
+        timestamp: Math.floor(Date.now() / 1000),
+      },
+    };
+
+    logMlbLiveActivity("forced-update", {
+      gamePk,
+      tokenCount: tokens.length,
+      signature,
+      forceUpdate,
+      shouldSendUpdateData: shouldSendUpdate,
+    });
+
+    const forwarded = await forwardToProvider(tokens, payload);
+
+    return { sent: true, tokenCount: tokens.length, forwarded };
   }
 
-  gameState.lastLiveActivitySignature = signature;
-  const baseProps = liveActivityBaseProps.get(gamePk) || null;
-  const nextProps = buildMlbLiveActivityProps(game, baseProps);
-
-  const debugLinescore =
-    game?.linescore || game?.liveData?.linescore || game?.live?.linescore || {};
-
-  const nextScoreSnapshot = {
-    away: Number(nextProps?.away?.score ?? 0),
-    home: Number(nextProps?.home?.score ?? 0),
-  };
-
-  const previousDescription = gameState.lastPreviousPlayDescription || "";
-  const { alert, scoringPlayKey } = buildMlbLiveActivityScoreAlert(
-    gameState.lastAlertedScoringPlay,
-    nextProps,
-  );
-
-  if (alert) {
-    gameState.lastAlertedScoringPlay = scoringPlayKey;
-  }
-  liveActivityBaseProps.set(gamePk, nextProps);
-  gameState.lastScoreSnapshot = nextScoreSnapshot;
-  gameState.lastPreviousPlayDescription = String(
-    nextProps?.previousPlayDescription || "",
-  ).trim();
-
-  const payload = {
-    aps: {
-      event: "update",
-      "content-state": buildLiveActivityContentState(nextProps),
-      timestamp: Math.floor(Date.now() / 1000),
-      ...(alert ? { alert } : {}),
-    },
-  };
-
-  const forwarded = await forwardToProvider(tokens, payload);
-  if (isMlbLiveActivityFinished(game) && !gameState.didSendDismissalEnd) {
-    const endResult = await sendMlbLiveActivityEnd(gamePk, nextProps);
-    if (endResult?.sent) {
-      gameState.didSendDismissalEnd = true;
-    }
-  }
-
-  return { sent: true, tokenCount: tokens.length, forwarded };
+  return { sent: false, reason: "unchanged", tokenCount: tokens.length };
 }
 
 async function pushMlbLiveActivityStart({ fixtureId, bundleId, payload }) {
@@ -1695,6 +1685,7 @@ async function fetchMlbGameForLiveActivity(gamePk) {
   return game;
 }
 
+// Modify processMlbLiveActivityTick to add debug logging:
 async function processMlbLiveActivityTick() {
   const dateStr = getMlbNotifDatePst();
   const payload = await fetchMlbScheduleForNotifications(dateStr);
@@ -1713,56 +1704,48 @@ async function processMlbLiveActivityTick() {
 
       const liveGame = (await fetchMlbGameForLiveActivity(gamePk)) || game;
 
-      const state = ensureGameState(gamePk, liveGame);
-      if (state.suppressUntilMs && Date.now() < state.suppressUntilMs) {
-        logMlbLiveActivity("skip-suppressed", { gamePk });
-        continue;
-      }
-
-      const signature = buildMlbLiveActivitySignature(liveGame);
-      if (state.lastLiveActivitySignature === signature) {
-        logMlbLiveActivity("skip-unchanged", { gamePk });
-        continue;
-      }
-
-      state.lastLiveActivitySignature = signature;
+      // DEBUG: Log the actual content being sent
       const baseProps = liveActivityBaseProps.get(gamePk) || null;
       const nextProps = buildMlbLiveActivityProps(liveGame, baseProps);
 
-      const { alert, scoringPlayKey } = buildMlbLiveActivityScoreAlert(
-        state.lastAlertedScoringPlay,
-        nextProps,
-      );
-
-      if (alert) {
-        state.lastAlertedScoringPlay = scoringPlayKey;
-      }
-
-      liveActivityBaseProps.set(gamePk, nextProps);
-
-      const payload = {
-        aps: {
-          event: "update",
-          "content-state": buildLiveActivityContentState(nextProps),
-          timestamp: Math.floor(Date.now() / 1000),
-          ...(alert ? { alert } : {}),
-        },
-      };
-
-      logMlbLiveActivity("sending-update", {
+      logMlbLiveActivity("debug-update-content", {
         gamePk,
-        tokenCount: tokens.length,
-        signature: signature.substring(0, 50) + "...",
+        tokensCount: tokens.length,
+        status: nextProps?.status?.text || "unknown",
+        score: `${nextProps?.away?.score || 0}-${nextProps?.home?.score || 0}`,
+        inning: nextProps?.status?.inning || "-",
+        bases: {
+          first: nextProps?.status?.base1 || false,
+          second: nextProps?.status?.base2 || false,
+          third: nextProps?.status?.base3 || false,
+        },
       });
 
-      const forwarded = await forwardToProvider(tokens, payload);
+      const state = ensureGameState(gamePk, liveGame);
 
-      // Handle completion
-      if (isMlbLiveActivityFinished(liveGame) && !state.didSendDismissalEnd) {
-        const endResult = await sendMlbLiveActivityEnd(gamePk, nextProps);
-        if (endResult?.sent) {
-          state.didSendDismissalEnd = true;
-        }
+      // Force an update every 30 seconds regardless of changes
+      const shouldUpdate =
+        !state.lastUpdateSent || Date.now() - state.lastUpdateSent > 15000;
+
+      if (shouldUpdate || state.suppressUntilMs < Date.now()) {
+        state.lastUpdateSent = Date.now();
+
+        const finalPayload = {
+          aps: {
+            event: "update",
+            "content-state": buildLiveActivityContentState(nextProps),
+            timestamp: Math.floor(Date.now() / 1000),
+            _forceUpdate: shouldUpdate,
+          },
+        };
+
+        const forwarded = await forwardToProvider(tokens, finalPayload);
+
+        logMlbLiveActivity("sending-force-update", {
+          gamePk,
+          tokenCount: tokens.length,
+          payloadPreview: JSON.stringify(nextProps?.status).substring(0, 100),
+        });
       }
     } catch (error) {
       logMlbLiveActivity("live-activity-error", {
