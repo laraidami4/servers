@@ -395,57 +395,6 @@ function clearLiveActivityTracking(gamePk) {
   return { tokenCount: tokens.length };
 }
 
-async function addFixturePushToStartToken(fixtureId, token) {
-  const fixtureKey = String(fixtureId || "").trim();
-  const tokenKey = String(token || "").trim();
-  if (!fixtureKey || !tokenKey) return false;
-
-  let tokens = fixturePushToStartTokens.get(fixtureKey);
-  if (!tokens) {
-    tokens = new Set();
-    fixturePushToStartTokens.set(fixtureKey, tokens);
-  }
-  tokens.add(tokenKey);
-
-  if (supabaseAdmin) {
-    try {
-      // Use insert with conflict resolution - don't delete anything!
-      const { error } = await supabaseAdmin
-        .from("live_activity_tokens")
-        .insert({
-          type: "fixture",
-          bundle_id: null,
-          token: tokenKey,
-          fixture_id: fixtureKey,
-        })
-        .select();
-
-      // Ignore duplicate key errors - that's expected
-      if (error && error.code !== "23505") {
-        console.warn(
-          "[baseball live-activity] supabase insert fixture token error:",
-          error?.message || error,
-        );
-      }
-      return true;
-    } catch (e) {
-      const errorMessage = e?.message || String(e);
-      // Ignore duplicate key errors
-      if (
-        !errorMessage.includes("23505") &&
-        !errorMessage.includes("duplicate")
-      ) {
-        console.warn(
-          "[baseball live-activity] supabase insert fixture token failed:",
-          errorMessage,
-        );
-      }
-      return true; // Still succeed even with duplicate
-    }
-  }
-  return true;
-}
-
 async function addPushToStartToken(bundleId, token) {
   const bundleKey = String(bundleId || "").trim();
   const tokenKey = String(token || "").trim();
@@ -460,38 +409,75 @@ async function addPushToStartToken(bundleId, token) {
 
   if (supabaseAdmin) {
     try {
-      // Use insert with conflict resolution - don't delete anything!
-      const { error } = await supabaseAdmin
-        .from("live_activity_tokens")
-        .insert({
+      // Use upsert with your existing constraint
+      const { error } = await supabaseAdmin.from("live_activity_tokens").upsert(
+        {
           type: "bundle",
           bundle_id: bundleKey,
           token: tokenKey,
           fixture_id: null,
-        })
-        .select();
+        },
+        {
+          onConflict: "type, token, fixture_id, bundle_id",
+        },
+      );
 
-      // Ignore duplicate key errors - that's expected
-      if (error && error.code !== "23505") {
+      if (error) {
         console.warn(
-          "[baseball live-activity] supabase insert bundle token error:",
+          "[baseball live-activity] supabase upsert bundle token error:",
           error?.message || error,
         );
       }
       return true;
     } catch (e) {
-      const errorMessage = e?.message || String(e);
-      // Ignore duplicate key errors
-      if (
-        !errorMessage.includes("23505") &&
-        !errorMessage.includes("duplicate")
-      ) {
+      console.warn(
+        "[baseball live-activity] supabase upsert bundle token failed:",
+        e?.message || e,
+      );
+    }
+  }
+  return true;
+}
+
+async function addFixturePushToStartToken(fixtureId, token) {
+  const fixtureKey = String(fixtureId || "").trim();
+  const tokenKey = String(token || "").trim();
+  if (!fixtureKey || !tokenKey) return false;
+
+  let tokens = fixturePushToStartTokens.get(fixtureKey);
+  if (!tokens) {
+    tokens = new Set();
+    fixturePushToStartTokens.set(fixtureKey, tokens);
+  }
+  tokens.add(tokenKey);
+
+  if (supabaseAdmin) {
+    try {
+      // Use upsert with your existing constraint
+      const { error } = await supabaseAdmin.from("live_activity_tokens").upsert(
+        {
+          type: "fixture",
+          bundle_id: null,
+          token: tokenKey,
+          fixture_id: fixtureKey,
+        },
+        {
+          onConflict: "type, token, fixture_id, bundle_id",
+        },
+      );
+
+      if (error) {
         console.warn(
-          "[baseball live-activity] supabase insert bundle token failed:",
-          errorMessage,
+          "[baseball live-activity] supabase upsert fixture token error:",
+          error?.message || error,
         );
       }
-      return true; // Still succeed even with duplicate
+      return true;
+    } catch (e) {
+      console.warn(
+        "[baseball live-activity] supabase upsert fixture token failed:",
+        e?.message || e,
+      );
     }
   }
   return true;
@@ -500,10 +486,7 @@ async function addPushToStartToken(bundleId, token) {
 async function getPushToStartTokensForBundle(bundleId) {
   const bundleKey = String(bundleId || "").trim();
   if (!bundleKey) return [];
-
-  // Check in-memory cache first
-  const cachedTokens = Array.from(pushToStartTokens.get(bundleKey) || []);
-
+  const fallbackTokens = Array.from(pushToStartTokens.get(bundleKey) || []);
   if (supabaseAdmin) {
     try {
       const { data, error } = await supabaseAdmin
@@ -511,13 +494,11 @@ async function getPushToStartTokensForBundle(bundleId) {
         .select("token")
         .eq("bundle_id", bundleKey)
         .eq("type", "bundle");
-
-      if (!error && Array.isArray(data)) {
-        const dbTokens = data
-          .map((row) => String(row.token || "").trim())
+      if (!error) {
+        const dbTokens = (data || [])
+          .map((row) => String(row?.token || "").trim())
           .filter(Boolean);
-        // Merge cached and database tokens, remove duplicates
-        const merged = Array.from(new Set([...cachedTokens, ...dbTokens]));
+        const merged = Array.from(new Set([...fallbackTokens, ...dbTokens]));
         return merged;
       }
     } catch (e) {
@@ -527,19 +508,15 @@ async function getPushToStartTokensForBundle(bundleId) {
       );
     }
   }
-
-  return cachedTokens;
+  return fallbackTokens;
 }
 
 async function getPushToStartTokensForFixture(fixtureId) {
   const fixtureKey = String(fixtureId || "").trim();
   if (!fixtureKey) return [];
-
-  // Check in-memory cache first
-  const cachedTokens = Array.from(
+  const fallbackTokens = Array.from(
     fixturePushToStartTokens.get(fixtureKey) || [],
   );
-
   if (supabaseAdmin) {
     try {
       const { data, error } = await supabaseAdmin
@@ -547,13 +524,11 @@ async function getPushToStartTokensForFixture(fixtureId) {
         .select("token")
         .eq("fixture_id", fixtureKey)
         .eq("type", "fixture");
-
-      if (!error && Array.isArray(data)) {
-        const dbTokens = data
-          .map((row) => String(row.token || "").trim())
+      if (!error) {
+        const dbTokens = (data || [])
+          .map((row) => String(row?.token || "").trim())
           .filter(Boolean);
-        // Merge cached and database tokens, remove duplicates
-        const merged = Array.from(new Set([...cachedTokens, ...dbTokens]));
+        const merged = Array.from(new Set([...fallbackTokens, ...dbTokens]));
         return merged;
       }
     } catch (e) {
@@ -563,8 +538,7 @@ async function getPushToStartTokensForFixture(fixtureId) {
       );
     }
   }
-
-  return cachedTokens;
+  return fallbackTokens;
 }
 
 function getLiveActivityTokensForGame(gamePk) {
