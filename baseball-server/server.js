@@ -409,32 +409,54 @@ async function addPushToStartToken(bundleId, token) {
 
   if (supabaseAdmin) {
     try {
-      // CHANGED: Use upsert instead of delete+insert
-      const { error } = await supabaseAdmin
+      // CHANGED: Check if token exists first
+      const { data: existing, error: fetchError } = await supabaseAdmin
         .from("live_activity_tokens")
-        .upsert(
+        .select("*")
+        .eq("token", tokenKey)
+        .maybeSingle();
+
+      if (fetchError) {
+        console.warn(
+          "[baseball] fetch existing token error:",
+          fetchError?.message,
+        );
+      }
+
+      let dbResult;
+      if (existing) {
+        // Update existing record
+        dbResult = await supabaseAdmin
+          .from("live_activity_tokens")
+          .update({
+            type: "bundle",
+            bundle_id: bundleKey,
+            fixture_id: null,
+          })
+          .eq("token", tokenKey);
+      } else {
+        // Insert new record
+        dbResult = await supabaseAdmin.from("live_activity_tokens").insert([
           {
             type: "bundle",
             bundle_id: bundleKey,
             token: tokenKey,
             fixture_id: null,
           },
-          {
-            onConflict: "token",
-            ignoreDuplicates: false,
-          }
-        );
-      if (error) {
+        ]);
+      }
+
+      if (dbResult.error) {
         console.warn(
-          "[baseball live-activity] supabase upsert bundle token error:",
-          error?.message || error,
+          "[baseball live-activity] supabase operation error:",
+          dbResult.error?.message || dbResult.error,
         );
       } else {
         return true;
       }
     } catch (e) {
       console.warn(
-        "[baseball live-activity] supabase upsert bundle token failed:",
+        "[baseball live-activity] supabase operation failed:",
         e?.message || e,
       );
     }
@@ -456,21 +478,18 @@ async function addFixturePushToStartToken(fixtureId, token) {
 
   if (supabaseAdmin) {
     try {
-      // CHANGED: Use upsert with unique constraint instead of delete+insert
-      const { error } = await supabaseAdmin
-        .from("live_activity_tokens")
-        .upsert(
-          {
-            type: "fixture",
-            bundle_id: null,
-            token: tokenKey,
-            fixture_id: fixtureKey,
-          },
-          {
-            onConflict: "token", // Assumes 'token' column has unique constraint
-            ignoreDuplicates: false,
-          }
-        );
+      // CHANGED: Use upsert with proper conflict resolution
+      const { error } = await supabaseAdmin.from("live_activity_tokens").upsert(
+        {
+          type: "fixture",
+          bundle_id: null,
+          token: tokenKey,
+          fixture_id: fixtureKey,
+        },
+        {
+          onConflict: "token",
+        },
+      );
       if (error) {
         console.warn(
           "[baseball live-activity] supabase upsert fixture token error:",
@@ -484,6 +503,34 @@ async function addFixturePushToStartToken(fixtureId, token) {
         "[baseball live-activity] supabase upsert fixture token failed:",
         e?.message || e,
       );
+
+      // Fallback: Try insert or ignore
+      try {
+        await supabaseAdmin
+          .from("live_activity_tokens")
+          .insert([
+            {
+              type: "fixture",
+              bundle_id: null,
+              token: tokenKey,
+              fixture_id: fixtureKey,
+            },
+          ])
+          .then(({ error }) => {
+            if (error && error.code !== "23505") {
+              console.warn(
+                "[baseball] fixture insert fallback error:",
+                error?.message,
+              );
+            }
+          });
+        return true;
+      } catch (fallbackError) {
+        console.warn(
+          "[baseball] fixture insert fallback also failed:",
+          fallbackError?.message,
+        );
+      }
     }
   }
   return true;
@@ -5306,9 +5353,9 @@ app.post("/live-activity/register-activity-token", async (req, res) => {
       liveActivityTokens.set(key, tokens);
     }
     tokens.add(tokenKey);
-    
+
     liveActivityTokenOwners.set(tokenKey, key);
-    
+
     if (req.body?.props) {
       liveActivityBaseProps.set(key, req.body.props);
     }
