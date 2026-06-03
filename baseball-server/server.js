@@ -5567,6 +5567,102 @@ app.post("/live-activity/update", async (req, res) => {
   }
 });
 
+// Add these debugging endpoints:
+
+// Debug endpoint to check Live Activity status
+app.get("/live-activity/debug/:gamePk", async (req, res) => {
+  const gamePk = String(req.params.gamePk || "").trim();
+  if (!gamePk) {
+    return res.status(400).json({ error: "gamePk required" });
+  }
+
+  const tokens = getLiveActivityTokensForGame(gamePk);
+  const baseProps = liveActivityBaseProps.get(gamePk);
+  const gameState = mlbNotifState.gameStates.get(gamePk);
+
+  return res.json({
+    gamePk,
+    tokenCount: tokens.length,
+    activeTokens: tokens,
+    baseProps: baseProps ? summarizeLiveActivityPayload(baseProps) : null,
+    gameState: {
+      lastLiveActivitySignature: gameState?.lastLiveActivitySignature,
+      suppressUntilMs: gameState?.suppressUntilMs,
+      didSendDismissalEnd: gameState?.didSendDismissalEnd,
+      lastScoreSnapshot: gameState?.lastScoreSnapshot,
+    },
+    serverKeys: Array.from(liveActivityTokens.keys()),
+    basePropsKeys: Array.from(liveActivityBaseProps.keys()),
+    activeGames: [...liveActivityTokens.entries()].map(([game, tks]) => ({
+      gamePk: game,
+      tokenCount: Array.from(tks).length,
+      tokens: Array.from(tks)
+        .slice(0, 3)
+        .map((t) => maskToken(t, 8)),
+    })),
+  });
+});
+
+// Immediate test endpoint for Live Activity
+app.post("/live-activity/test-immediate", async (req, res) => {
+  const { gamePk, token } = req.body || {};
+  const key = String(gamePk || "").trim();
+  const tokenKey = String(token || "").trim();
+
+  if (!key || !tokenKey) {
+    return res.status(400).json({ error: "gamePk and token required" });
+  }
+
+  try {
+    // Build minimal test payload
+    const game = await fetchMlbGameForLiveActivity(key);
+    if (!game) {
+      return res.status(404).json({ error: "Game not found" });
+    }
+
+    const testPayload = buildMlbLiveActivityProps(game);
+
+    // Register the token immediately
+    let tokens = liveActivityTokens.get(key);
+    if (!tokens) {
+      tokens = new Set();
+      liveActivityTokens.set(key, tokens);
+    }
+    tokens.add(tokenKey);
+    liveActivityTokenOwners.set(tokenKey, key);
+
+    // Send direct Live Activity start
+    const startPayload = {
+      aps: {
+        event: "start",
+        timestamp: Math.floor(Date.now() / 1000),
+        "attributes-type": "LiveActivityAttributes",
+        attributes: {
+          gamePk: key,
+          activityId: `test-${key}-${Date.now()}`,
+          debug: true,
+        },
+        alert: {
+          title: "Live Activity Test",
+          body: `${testPayload.away.shortName} vs ${testPayload.home.shortName}`,
+        },
+        "content-state": buildLiveActivityContentState(testPayload),
+      },
+    };
+
+    const result = await forwardToProvider(tokenKey, startPayload);
+
+    return res.json({
+      ok: true,
+      payload: summarizeLiveActivityPayload(testPayload),
+      result,
+    });
+  } catch (err) {
+    console.error("Test immediate error:", err);
+    return res.status(500).json({ error: err.message });
+  }
+});
+
 // Start server and warm cache
 app.listen(PORT, async () => {
   await warmLeagues();
