@@ -460,26 +460,17 @@ async function addFixturePushToStartToken(fixtureId, token) {
 
   if (supabaseAdmin) {
     try {
-      // Use insert - ignore duplicates
-      const { error } = await supabaseAdmin
-        .from("live_activity_tokens")
-        .insert({
-          type: "fixture",
-          bundle_id: null,
-          token: tokenKey,
-          fixture_id: fixtureKey,
-        });
+      // Always insert - don't worry about conflicts since we want multiple rows
+      await supabaseAdmin.from("live_activity_tokens").insert({
+        type: "fixture",
+        bundle_id: null,
+        token: tokenKey,
+        fixture_id: fixtureKey,
+      });
 
-      // Ignore duplicate key errors
-      if (error && error.code !== "23505") {
-        console.warn(
-          "[baseball live-activity] supabase insert fixture token error:",
-          error?.message || error,
-        );
-      }
       return true;
     } catch (e) {
-      // Still return true for duplicate errors
+      // Ignore ONLY duplicate key errors
       const errorMessage = e?.message || String(e);
       if (
         !errorMessage.includes("23505") &&
@@ -1579,6 +1570,9 @@ async function pushMlbLiveActivityStart({ fixtureId, bundleId, payload }) {
     return { sent: false, reason: "no-push-to-start-tokens", tokenCount: 0 };
   }
 
+  // CHANGED: Use unique activityId per game
+  const activityId = `mlb-${fixtureKey}-${Date.now()}`;
+
   const startPayload = {
     aps: {
       event: "start",
@@ -1586,6 +1580,7 @@ async function pushMlbLiveActivityStart({ fixtureId, bundleId, payload }) {
       "attributes-type": "LiveActivityAttributes",
       attributes: {
         gamePk: fixtureKey,
+        activityId: activityId, // Unique identifier
       },
       "input-push-token": 1,
       alert: buildMlbLiveActivityStartAlert(payload),
@@ -5384,7 +5379,7 @@ app.post("/live-activity/start", async (req, res) => {
       payload?.previousPlayDescription || "",
     ).trim();
 
-    // CHANGED: Just ensure tokens exist, don't delete existing ones
+    // Get tokens
     const currentFixtureTokens = await getPushToStartTokensForFixture(key);
     const currentBundleTokens = await getPushToStartTokensForBundle(
       bundleId || APPLE_BUNDLE_ID,
@@ -5393,10 +5388,19 @@ app.post("/live-activity/start", async (req, res) => {
       new Set([...currentFixtureTokens, ...currentBundleTokens]),
     );
 
+    // CHANGED: Add unique activityType per game
+    const uniqueActivityType = `mlb-game-${key}`;
+
+    // Modify the payload to include unique activityType
+    const enhancedPayload = {
+      ...payload,
+      activityType: uniqueActivityType, // This ensures uniqueness
+    };
+
     const result = await pushMlbLiveActivityStart({
       fixtureId: key,
       bundleId: bundleId || APPLE_BUNDLE_ID,
-      payload,
+      payload: enhancedPayload, // Use enhanced payload
     });
 
     console.log("START", {
