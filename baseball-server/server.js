@@ -405,29 +405,28 @@ async function addPushToStartToken(bundleId, token) {
     tokens = new Set();
     pushToStartTokens.set(bundleKey, tokens);
   }
-  // Don't clear - we want to support multiple simultaneous live activities
   tokens.add(tokenKey);
 
   if (supabaseAdmin) {
     try {
-      await supabaseAdmin
-        .from("live_activity_tokens")
-        .delete()
-        .eq("type", "bundle")
-        .eq("bundle_id", bundleKey);
+      // CHANGED: Use upsert instead of delete+insert
       const { error } = await supabaseAdmin
         .from("live_activity_tokens")
-        .insert([
+        .upsert(
           {
             type: "bundle",
             bundle_id: bundleKey,
             token: tokenKey,
             fixture_id: null,
           },
-        ]);
+          {
+            onConflict: "token",
+            ignoreDuplicates: false,
+          }
+        );
       if (error) {
         console.warn(
-          "[baseball live-activity] supabase insert bundle token error:",
+          "[baseball live-activity] supabase upsert bundle token error:",
           error?.message || error,
         );
       } else {
@@ -453,29 +452,28 @@ async function addFixturePushToStartToken(fixtureId, token) {
     tokens = new Set();
     fixturePushToStartTokens.set(fixtureKey, tokens);
   }
-  // Don't clear - we want to support multiple simultaneous live activities
   tokens.add(tokenKey);
 
   if (supabaseAdmin) {
     try {
-      await supabaseAdmin
-        .from("live_activity_tokens")
-        .delete()
-        .eq("type", "fixture")
-        .eq("fixture_id", fixtureKey);
+      // CHANGED: Use upsert with unique constraint instead of delete+insert
       const { error } = await supabaseAdmin
         .from("live_activity_tokens")
-        .insert([
+        .upsert(
           {
             type: "fixture",
             bundle_id: null,
             token: tokenKey,
             fixture_id: fixtureKey,
           },
-        ]);
+          {
+            onConflict: "token", // Assumes 'token' column has unique constraint
+            ignoreDuplicates: false,
+          }
+        );
       if (error) {
         console.warn(
-          "[baseball live-activity] supabase insert fixture token error:",
+          "[baseball live-activity] supabase upsert fixture token error:",
           error?.message || error,
         );
       } else {
@@ -5291,23 +5289,40 @@ app.post("/live-activity/register-activity-token", async (req, res) => {
 
     const previousOwner = liveActivityTokenOwners.get(tokenKey) || null;
     if (previousOwner && previousOwner !== key) {
-      liveActivityTokens.delete(previousOwner);
+      // CHANGED: Remove only this specific token from the previous game's set
+      const prevTokens = liveActivityTokens.get(previousOwner);
+      if (prevTokens) {
+        prevTokens.delete(tokenKey);
+        if (prevTokens.size === 0) {
+          liveActivityTokens.delete(previousOwner);
+        }
+      }
     }
 
-    liveActivityTokens.set(key, new Set([tokenKey]));
+    // CHANGED: Add token to the new game's set (don't replace entire set)
+    let tokens = liveActivityTokens.get(key);
+    if (!tokens) {
+      tokens = new Set();
+      liveActivityTokens.set(key, tokens);
+    }
+    tokens.add(tokenKey);
+    
     liveActivityTokenOwners.set(tokenKey, key);
+    
     if (req.body?.props) {
       liveActivityBaseProps.set(key, req.body.props);
     }
 
-    console.log({
+    logMlbActivity("register-activity-token:success", {
       gamePk,
       fixtureId,
       key,
-      token,
+      token: maskToken(tokenKey),
+      previousOwner,
+      currentTokenCount: tokens.size,
     });
 
-    return res.json({ ok: true, tokenCount: 1 });
+    return res.json({ ok: true, tokenCount: tokens.size });
   } catch (err) {
     return res.status(500).json({ error: err.message });
   }
