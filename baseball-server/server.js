@@ -417,6 +417,7 @@ async function addPushToStartToken(bundleId, token) {
   const tokenKey = String(token || "").trim();
   if (!bundleKey || !tokenKey) return false;
 
+  // Add to memory first
   let tokens = pushToStartTokens.get(bundleKey);
   if (!tokens) {
     tokens = new Set();
@@ -424,41 +425,18 @@ async function addPushToStartToken(bundleId, token) {
   }
   tokens.add(tokenKey);
 
+  // Try database upsert
   if (supabaseAdmin) {
-    try {
-      // Use insert - ignore duplicates
-      const { error } = await supabaseAdmin
-        .from("live_activity_tokens")
-        .insert({
-          type: "bundle",
-          bundle_id: bundleKey,
-          token: tokenKey,
-          fixture_id: null,
-        });
-
-      // Ignore duplicate key errors - that's expected behavior
-      if (error && error.code !== "23505") {
-        // 23505 = unique violation
-        console.warn(
-          "[baseball live-activity] supabase insert bundle token error:",
-          error?.message || error,
-        );
-      }
-      return true;
-    } catch (e) {
-      // Still return true for duplicate errors
-      const errorMessage = e?.message || String(e);
-      if (
-        !errorMessage.includes("23505") &&
-        !errorMessage.includes("duplicate")
-      ) {
-        console.warn(
-          "[baseball live-activity] supabase insert bundle token failed:",
-          errorMessage,
-        );
-      }
-      return true;
-    }
+    return await upsertTokenWithRetry(
+      "live_activity_tokens",
+      {
+        type: "bundle",
+        bundle_id: bundleKey,
+        token: tokenKey,
+        fixture_id: null,
+      },
+      "type,token",
+    );
   }
   return true;
 }
@@ -468,6 +446,7 @@ async function addFixturePushToStartToken(fixtureId, token) {
   const tokenKey = String(token || "").trim();
   if (!fixtureKey || !tokenKey) return false;
 
+  // Add to memory first
   let tokens = fixturePushToStartTokens.get(fixtureKey);
   if (!tokens) {
     tokens = new Set();
@@ -476,31 +455,16 @@ async function addFixturePushToStartToken(fixtureId, token) {
   tokens.add(tokenKey);
 
   if (supabaseAdmin) {
-    try {
-      // Insert new row for this fixture and token combination
-      const { error } = await supabaseAdmin
-        .from("live_activity_tokens")
-        .insert({
-          type: "fixture",
-          bundle_id: null,
-          token: tokenKey,
-          fixture_id: fixtureKey,
-        });
-
-      if (error) {
-        console.warn(
-          "[baseball live-activity] supabase insert fixture token failed:",
-          error?.message || error,
-        );
-      }
-      return true;
-    } catch (e) {
-      console.warn(
-        "[baseball live-activity] supabase insert fixture token failed:",
-        e?.message || String(e),
-      );
-      return true;
-    }
+    return await upsertTokenWithRetry(
+      "live_activity_tokens",
+      {
+        type: "fixture",
+        bundle_id: null,
+        token: tokenKey,
+        fixture_id: fixtureKey,
+      },
+      "type,token",
+    );
   }
   return true;
 }
@@ -1603,7 +1567,7 @@ async function pushMlbLiveActivityStart({ fixtureId, bundleId, payload }) {
     return { sent: false, reason: "no-push-to-start-tokens", tokenCount: 0 };
   }
 
-  // CHANGED: Use unique activityId per game
+  // Unique activityId per game
   const activityId = `mlb-${fixtureKey}-${Date.now()}`;
 
   const startPayload = {
@@ -1613,7 +1577,7 @@ async function pushMlbLiveActivityStart({ fixtureId, bundleId, payload }) {
       "attributes-type": "LiveActivityAttributes",
       attributes: {
         gamePk: fixtureKey,
-        activityId: activityId, // Unique identifier
+        activityId: activityId,
       },
       "input-push-token": 1,
       alert: buildMlbLiveActivityStartAlert(payload),
@@ -1643,7 +1607,75 @@ async function pushMlbLiveActivityStart({ fixtureId, bundleId, payload }) {
     };
   }
 
-  return { sent: true, tokenCount: tokens.length, forwarded };
+  // After successful start, register the push-to-start tokens as activity tokens
+  for (const token of tokens) {
+    try {
+      // Register this token explicitly as an activity token
+      let tokensSet = liveActivityTokens.get(fixtureKey);
+      if (!tokensSet) {
+        tokensSet = new Set();
+        liveActivityTokens.set(fixtureKey, tokensSet);
+      }
+      tokensSet.add(token);
+      liveActivityTokenOwners.set(token, fixtureKey);
+
+      logMlbLiveActivity("converted-token", {
+        gamePk: fixtureKey,
+        token: maskToken(token),
+        type: "push-to-start => activity",
+      });
+    } catch (err) {
+      logMlbLiveActivity("token-conversion-error", {
+        gamePk: fixtureKey,
+        error: err.message,
+      });
+    }
+  }
+
+  return {
+    sent: true,
+    tokenCount: tokens.length,
+    forwarded,
+    convertedTokens: tokens.length,
+  };
+}
+
+// Update the register endpoints to handle the duplicate constraint issue
+function logTokenCollision(token, type, details = {}) {
+  logMlbLiveActivity("unique-constraint-collision", {
+    token: maskToken(token),
+    type,
+    details,
+  });
+}
+
+// Ensure unique constraint handling works around existing entries
+async function upsertTokenWithRetry(table, data, conflictQuery) {
+  if (!supabaseAdmin) return null;
+
+  try {
+    const { error } = await supabaseAdmin.from(table).upsert(data, {
+      onConflict: conflictQuery,
+      ignoreDuplicates: true,
+    });
+
+    if (error) {
+      // Handle duplicate key gracefully
+      if (error.code === "23505") {
+        // duplicate key
+        logTokenCollision(data.token, data.type, { code: error.code });
+        return true; // Still success for upsert
+      }
+      throw error;
+    }
+    return true;
+  } catch (e) {
+    console.warn(
+      `[baseball live-activity] supabase upsert failed:`,
+      e?.message || e,
+    );
+    return false;
+  }
 }
 
 async function fetchMlbGameForLiveActivity(gamePk) {
@@ -5576,14 +5608,44 @@ app.get("/live-activity/debug/:gamePk", async (req, res) => {
     return res.status(400).json({ error: "gamePk required" });
   }
 
-  const tokens = getLiveActivityTokensForGame(gamePk);
+  const activityTokens = getLiveActivityTokensForGame(gamePk);
+  const pushToStartFixtureTokens = fixturePushToStartTokens.get(gamePk)
+    ? Array.from(fixturePushToStartTokens.get(gamePk))
+    : [];
+  const pushToStartBundleTokens = [];
+
+  // Get bundle tokens that might apply
+  if (supabaseAdmin) {
+    const { data } = await supabaseAdmin
+      .from("live_activity_tokens")
+      .select("token")
+      .eq("type", "bundle")
+      .eq("bundle_id", APPLE_BUNDLE_ID);
+
+    if (data) {
+      pushToStartBundleTokens.push(...data.map((r) => r.token));
+    }
+  }
+
   const baseProps = liveActivityBaseProps.get(gamePk);
   const gameState = mlbNotifState.gameStates.get(gamePk);
 
   return res.json({
     gamePk,
-    tokenCount: tokens.length,
-    activeTokens: tokens,
+    activityTokens: {
+      count: activityTokens.length,
+      tokens: activityTokens.map((t) => maskToken(t, 8)),
+    },
+    pushToStartTokens: {
+      fixture: {
+        count: pushToStartFixtureTokens.length,
+        tokens: pushToStartFixtureTokens.map((t) => maskToken(t, 8)),
+      },
+      bundle: {
+        count: pushToStartBundleTokens.length,
+        tokens: pushToStartBundleTokens.map((t) => maskToken(t, 8)),
+      },
+    },
     baseProps: baseProps ? summarizeLiveActivityPayload(baseProps) : null,
     gameState: {
       lastLiveActivitySignature: gameState?.lastLiveActivitySignature,
@@ -5593,13 +5655,10 @@ app.get("/live-activity/debug/:gamePk", async (req, res) => {
     },
     serverKeys: Array.from(liveActivityTokens.keys()),
     basePropsKeys: Array.from(liveActivityBaseProps.keys()),
-    activeGames: [...liveActivityTokens.entries()].map(([game, tks]) => ({
-      gamePk: game,
-      tokenCount: Array.from(tks).length,
-      tokens: Array.from(tks)
-        .slice(0, 3)
-        .map((t) => maskToken(t, 8)),
-    })),
+    isActive:
+      activityTokens.length > 0 ||
+      pushToStartFixtureTokens.length > 0 ||
+      pushToStartBundleTokens.length > 0,
   });
 });
 
