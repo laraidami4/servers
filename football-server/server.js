@@ -473,7 +473,6 @@ const SAP_TO_SM_TEAM_NAME_MAP = Object.freeze({
   "san jose earthquakes": "sj earthquakes",
 });
 
-
 async function fetchUrl(url, headers = {}) {
   const response = await axios.get(url, { timeout: 30000, headers });
   return response.data;
