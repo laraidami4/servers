@@ -1698,7 +1698,6 @@ async function processMlbLiveActivityTick() {
 
       const tokens = getLiveActivityTokensForGame(gamePk);
       if (tokens.length === 0) {
-        logMlbLiveActivity("skip-update-no-tokens", { gamePk });
         continue;
       }
 

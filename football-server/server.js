@@ -460,7 +460,7 @@ const gameActivity = new Map();
 let leagueMeta = null;
 
 // ─── SportsApiPro competition IDs to warm on startup ─────────────────────────
-const SAP_COMPETITION_IDS = [7, 11, 25, 17, 35, 104];
+const SAP_COMPETITION_IDS = [7, 11, 25, 17, 35, 104, 5930];
 
 // Optional aliases: SportsApiPro team name -> SportMonks team name.
 // Keys and values are compared through normalizeName(), so accents/casing/punctuation
