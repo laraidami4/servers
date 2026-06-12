@@ -427,7 +427,9 @@ const pushMetrics = {
 };
 
 // ─── API credentials (prefer env vars so tokens aren't baked in) ──────────────
-const SM_TOKEN = process.env.SM_TOKEN || "qQWHXlc9FBi5tjqAHoqQAL7hCY7ABLgu9QxK7chbYZaKwwtRnbsRrvKeKVzZ";
+const SM_TOKEN =
+  process.env.SM_TOKEN ||
+  "mObDMf7t47JiK4x4LNCRRkEWrHkd2XiZZvJuvYXR2gUDh4nbHlTVtA15H2JV";
 const SM_BASE = "https://api.sportmonks.com/v3/football";
 const SAP_BASE = "https://v1.football.sportsapipro.com";
 const SAP_KEY = process.env.SAP_KEY || null;
@@ -472,7 +474,6 @@ const SAP_TO_SM_TEAM_NAME_MAP = Object.freeze({
   "los angeles galaxy": "la galaxy",
   "san jose earthquakes": "sj earthquakes",
 });
-
 
 async function fetchUrl(url, headers = {}) {
   const response = await axios.get(url, { timeout: 30000, headers });
@@ -1021,7 +1022,7 @@ function transformLeagueResponse(combined) {
   const teamsRaw = Array.isArray(combined.teamsInSeason?.data)
     ? combined.teamsInSeason.data
     : [];
-  const teamsInSeason = teamsRaw.map((t) => {
+  const teamsInSeason = teamsRaw.filter((t) => t.short_code != null).map((t) => {
     const teamColors = findSapColors(t.name, colorMap);
     return {
       id: t.id ?? null,
@@ -1346,72 +1347,72 @@ app.get("/football/league/:leagueId", async (req, res) => {
     });
   }
 
-try {
-  const [standings, teamsInSeason, leagueInfo, stageStats, teamOfTheWeek] =
-    await Promise.all([
-      fetchUrl(
-        `${SM_BASE}/standings/seasons/${seasonId}?api_token=${SM_TOKEN}` +
-          `&include=rule.type;stage;participant;details.type;form;league;group`,
-      ),
-      fetchUrl(
-        `${SM_BASE}/teams/seasons/${seasonId}?api_token=${SM_TOKEN}` +
-          `&include=sidelined.player;sidelined.type;statistics.details.type;players.player;players.detailedPosition;players.position` +
-          `&filters=teamstatisticSeasons:${seasonId}`,
-      ),
-      fetchUrl(
-        `${SM_BASE}/leagues/${leagueId}?api_token=${SM_TOKEN}` +
-          `&include=currentSeason;country;latest.round;latest.aggregate;latest.scores;latest.participants;latest.venue;upcoming.round;upcoming.aggregate;upcoming.participants;upcoming.venue&timezone=America/Toronto`,
-      ),
-      stageId
-        ? fetchUrl(
-            `${SM_BASE}/statistics/stages/${stageId}?api_token=${SM_TOKEN}` +
-              `&include=type;participant`,
-          )
-        : Promise.resolve(null),
-      fetchUrl(
-        `${SM_BASE}/team-of-the-week/leagues/${leagueId}/latest?api_token=${SM_TOKEN}` +
-          `&include=player.country;team;round`,
-      )
-        .then((data) =>
-          data?.message === "The requested endpoint does not exist"
-            ? null
-            : data,
+  try {
+    const [standings, teamsInSeason, leagueInfo, stageStats, teamOfTheWeek] =
+      await Promise.all([
+        fetchUrl(
+          `${SM_BASE}/standings/seasons/${seasonId}?api_token=${SM_TOKEN}` +
+            `&include=rule.type;stage;participant;details.type;form;league;group`,
+        ),
+        fetchUrl(
+          `${SM_BASE}/teams/seasons/${seasonId}?api_token=${SM_TOKEN}` +
+            `&include=sidelined.player;sidelined.type;statistics.details.type;players.player;players.detailedPosition;players.position` +
+            `&filters=teamstatisticSeasons:${seasonId}`,
+        ),
+        fetchUrl(
+          `${SM_BASE}/leagues/${leagueId}?api_token=${SM_TOKEN}` +
+            `&include=currentSeason;country;latest.round;latest.aggregate;latest.scores;latest.participants;latest.venue;upcoming.round;upcoming.aggregate;upcoming.participants;upcoming.venue&timezone=America/Toronto`,
+        ),
+        stageId
+          ? fetchUrl(
+              `${SM_BASE}/statistics/stages/${stageId}?api_token=${SM_TOKEN}` +
+                `&include=type;participant`,
+            )
+          : Promise.resolve(null),
+        fetchUrl(
+          `${SM_BASE}/team-of-the-week/leagues/${leagueId}/latest?api_token=${SM_TOKEN}` +
+            `&include=player.country;team;round`,
         )
-        .catch((err) => {
-          console.error(
-            `Team of the Week failed for league ${leagueId}:`,
-            err.response?.status,
-            err.response?.data || err.message,
-          );
-          return null;
-        }),
-    ]);
+          .then((data) =>
+            data?.message === "The requested endpoint does not exist"
+              ? null
+              : data,
+          )
+          .catch((err) => {
+            console.error(
+              `Team of the Week failed for league ${leagueId}:`,
+              err.response?.status,
+              err.response?.data || err.message,
+            );
+            return null;
+          }),
+      ]);
 
-  const combined = {
-    standings,
-    teamsInSeason,
-    leagueInfo,
-    stageStats,
-    ...(teamOfTheWeek ? { teamOfTheWeek } : {}),
-  };
+    const combined = {
+      standings,
+      teamsInSeason,
+      leagueInfo,
+      stageStats,
+      ...(teamOfTheWeek ? { teamOfTheWeek } : {}),
+    };
 
-  cacheSet(cacheKey, combined);
+    cacheSet(cacheKey, combined);
 
-  setCacheControl(res, TTL_1H);
-  res.json({ source: "origin", data: transformLeagueResponse(combined) });
-} catch (err) {
-  console.error("League endpoint error:", {
-    status: err.response?.status,
-    data: err.response?.data,
-    message: err.message,
-  });
+    setCacheControl(res, TTL_1H);
+    res.json({ source: "origin", data: transformLeagueResponse(combined) });
+  } catch (err) {
+    console.error("League endpoint error:", {
+      status: err.response?.status,
+      data: err.response?.data,
+      message: err.message,
+    });
 
-  res.status(502).json({
-    error: "Failed to fetch league data",
-    details: err.message,
-    upstreamStatus: err.response?.status,
-  });
-}
+    res.status(502).json({
+      error: "Failed to fetch league data",
+      details: err.message,
+      upstreamStatus: err.response?.status,
+    });
+  }
 });
 
 // Transforms combined team data per a–d.txt specs.
@@ -2930,6 +2931,59 @@ const MATCH_FACT_TYPE_NAME_MAP = Object.freeze({
   76086: "Match Facts Outcomes by goals",
   76087: "Match Facts Outcomes by Players Sent Off Field",
   81181: "Match Fact Late Goal Streak",
+  76084: "Match Fact First to score doesn't win",
+  81176: "Match Fact Cards Count in Match",
+  87861: "Match Fact Last 5 Draw",
+  87924: "Match Fact Last 5 Cards Count",
+  87926: "Match Fact Last 15 Cards Count",
+  87927: "Match Fact Last 25 Cards Count",
+  109563: "Match Fact Corners Live Comparison",
+  109564: "Match Fact First to Score Doesnt Win Streak",
+  109565: "Match Fact Winless Streak Coach",
+  109566: "Match Fact Loss Coach",
+  109567: "Match Fact Dangerous Attack Live Comparison",
+  109568: "Match Fact Passes Comparison",
+  109569: "Match Fact Attacks Live Comparison",
+  109570: "Match Fact Draw Streak Coach",
+  109571: "Match Fact Btts Streak Live",
+  109572: "Match Fact Expected Goals Comparison",
+  109573: "Match Fact Was not First to Score Streak Live",
+  109574: "Match Fact Shots On Target Comparison",
+  109575: "Match Fact Cards Per Foul Ref Comparison",
+  109576: "Match Fact Yellow Cards Comparison",
+  109577: "Match Fact Last 5 Draw Coach",
+  109578: "Match Fact Last 5 Win Coach",
+  109579: "Match Fact no Early Goal Streak Live",
+  109580: "Match Fact Unbeaten Streak Coach",
+  109581: "Match Fact Loss Streak Live",
+  109582: "Match Fact Free Kicks Live Comparison",
+  109583: "Match Fact no Late Goal Streak Live",
+  109584: "Match Fact Win Streak Coach",
+  109585: "Match Fact Loss Streak Coach",
+  109586: "Match Fact Red Cards Comparison",
+  109587: "Match Fact Shots Total Live Comparison",
+  109588: "Match Fact Shooting Performance Comparison",
+  109589: "Match Fact YellowRed Cards Per Foul Ref Comparison",
+  109590: "Match Fact was First To Score Streak Live",
+  109591: "Match Fact Late Goal Streak Live",
+  109592: "Match Fact Fouls Comparison",
+  109593: "Match Fact Yellow Red Cards Comparison",
+  109594: "Match Fact Played For Other Team",
+  109595: "Match Fact Red Cards Per Foul Ref Comparison",
+  109596: "Match Fact Key Passes Comparison",
+  109597: "Match Fact Last 5 Loss Coach",
+  109598: "Match Fact Shots on Target Live Comparison",
+  109599: "Match Fact Duels Won Comparison",
+  109600: "Match Fact Corners Comparison",
+  109601: "Match Fact Unbeaten Streak Live",
+  109602: "Match Fact Yellow Cards Per Foul Ref Comparison",
+  109603: "Match Fact Winless Streak Live",
+  109604: "Match Fact Attacks Comparison",
+  109605: "Match Fact Win Streak Live",
+  109606: "Match Fact Shots Total Comparison",
+  109607: "Match Fact Total h2h Matches Coach",
+  109608: "Match Fact Draw Coach",
+  109609: "Match Fact Win Coach",
 });
 
 function transformMatchFactsResponse(raw) {
@@ -2941,8 +2995,15 @@ function transformMatchFactsResponse(raw) {
       type_id: item.type_id ?? null,
       name:
         MATCH_FACT_TYPE_NAME_MAP[item?.type_id] ??
+        `${item?.basis?.toUpperCase()} · ${item?.category
+          ?.split("_")
+          .join(" ")
+          .replace(/\b\w/g, (c) => c.toUpperCase())} · ${item?.scope
+          ?.split("_")
+          .join(" ")
+          .replace(/\b\w/g, (c) => c.toUpperCase())}` ??
         (item?.type_id != null ? String(item.type_id) : null),
-      team: item.team ?? null,
+      team: item.participant ?? null,
       category: item.category ?? null,
       data: item.data ?? null,
       natural_language: item.natural_language ?? null,
@@ -3043,8 +3104,7 @@ async function fetchFixtureWithFallback(baseUrl, includes) {
 
   while (activeIncludes.length > 0) {
     try {
-      const url =
-        `${baseUrl}&include=${activeIncludes.join(";")}`;
+      const url = `${baseUrl}&include=${activeIncludes.join(";")}`;
 
       return await fetchUrl(url);
     } catch (err) {
@@ -3054,9 +3114,7 @@ async function fetchFixtureWithFallback(baseUrl, includes) {
         throw err;
       }
 
-      const match = data.message?.match(
-        /'([^']+)' include/i,
-      );
+      const match = data.message?.match(/'([^']+)' include/i);
 
       if (!match) {
         throw err;
@@ -3064,9 +3122,7 @@ async function fetchFixtureWithFallback(baseUrl, includes) {
 
       const blockedInclude = match[1].toLowerCase();
 
-      console.warn(
-        `Removing inaccessible include: ${blockedInclude}`,
-      );
+      console.warn(`Removing inaccessible include: ${blockedInclude}`);
 
       activeIncludes = activeIncludes.filter(
         (i) => i.toLowerCase() !== blockedInclude,
@@ -3118,37 +3174,37 @@ app.get("/football/game/:fixtureId/:team1/:team2", async (req, res) => {
 
   try {
     const includes = [
-  "state",
-  "aggregate",
-  "round",
-  "periods",
-  "participants",
-  "scores",
-  "league.country",
-  "comments",
-  "formations",
-  "venue",
-  "weatherReport",
-  "events",
-  "statistics.type",
-  "formations",
-  "sidelined.player",
-  "sidelined.type",
-  "sidelined.sideline",
-  "lineups.player",
-  "lineups.type",
-  "lineups.position",
-  "lineups.detailedPosition",
-  "coaches",
-  "referees.referee",
-  "lineups.details.type",
-  "ballCoordinates",
-];
+      "state",
+      "aggregate",
+      "round",
+      "periods",
+      "participants",
+      "scores",
+      "league.country",
+      "comments",
+      "formations",
+      "venue",
+      "weatherReport",
+      "events",
+      "statistics.type",
+      "formations",
+      "sidelined.player",
+      "sidelined.type",
+      "sidelined.sideline",
+      "lineups.player",
+      "lineups.type",
+      "lineups.position",
+      "lineups.detailedPosition",
+      "coaches",
+      "referees.referee",
+      "lineups.details.type",
+      "ballCoordinates",
+    ];
 
-const freshFixture = await fetchFixtureWithFallback(
-  `${SM_BASE}/fixtures/${fixtureId}?api_token=${SM_TOKEN}&timezone=America/Toronto`,
-  includes,
-);
+    const freshFixture = await fetchFixtureWithFallback(
+      `${SM_BASE}/fixtures/${fixtureId}?api_token=${SM_TOKEN}&timezone=America/Toronto`,
+      includes,
+    );
 
     cacheSet(fixtureCacheKey, freshFixture);
 
@@ -3224,12 +3280,10 @@ app.get("/football/game/light/:fixtureId", async (req, res) => {
       },
     });
   } catch (err) {
-    res
-      .status(502)
-      .json({
-        error: "Failed to fetch game data (light)",
-        details: err.message,
-      });
+    res.status(502).json({
+      error: "Failed to fetch game data (light)",
+      details: err.message,
+    });
   }
 });
 
@@ -4955,9 +5009,9 @@ async function warmCacheTeams() {
       page++;
     }
     // Filter out gender-neutral placeholder teams (e.g. TBC) before caching
-    const filtered = all.filter(
-      (item) => (item.gender ?? "").toString().toLowerCase() !== "neutral",
-    );
+    const filtered = all
+      .filter((item) => (item.gender ?? "").toString().toLowerCase() !== "neutral")
+      .filter((item) => item.short_code != null); // Add filter for non-null short_code
     const transformed = filtered.map(transformCacheTeam);
     cacheSet("cache:teams", transformed);
   } catch (err) {
