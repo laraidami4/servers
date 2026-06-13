@@ -2454,7 +2454,7 @@ app.get("/football/fixture/:date", async (req, res) => {
   }
 
   const isoDate = `${raw.slice(0, 4)}-${raw.slice(4, 6)}-${raw.slice(6, 8)}`;
-  const cacheKey = `fixture:date:${raw}`;
+  const cacheKey = `fixture:date:${raw}:v1`;
   const url =
     `${SM_BASE}/fixtures/date/${isoDate}?api_token=${SM_TOKEN}` +
     `&per_page=50&include=group;aggregate;state;periods;participants;scores;venue;league.country&timezone=America/Toronto`;
@@ -3016,7 +3016,7 @@ function transformMatchFactsResponse(raw) {
 // Fetches head-to-head history and caches for 12 h.
 app.get("/football/game/h2h/:team1/:team2", async (req, res) => {
   const { team1, team2 } = req.params;
-  const h2hCacheKey = `h2h:${team1}:${team2}`;
+  const h2hCacheKey = `h2h:${team1}:${team2}:v1`;
 
   const h2hUrl =
     `${SM_BASE}/fixtures/head-to-head/${team1}/${team2}?api_token=${SM_TOKEN}` +
@@ -3054,7 +3054,7 @@ app.get("/football/game/h2h/:team1/:team2", async (req, res) => {
 // Fetches match facts and caches for 12 h.
 app.get("/football/game/facts/:fixtureId", async (req, res) => {
   const { fixtureId } = req.params;
-  const matchFactsCacheKey = `matchfacts:${fixtureId}`;
+  const matchFactsCacheKey = `matchfacts:${fixtureId}:v1`;
 
   const matchFactsUrl =
     `${SM_BASE}/match-facts/${fixtureId}?api_token=${SM_TOKEN}` +
@@ -3139,7 +3139,7 @@ async function fetchFixtureWithFallback(baseUrl, includes) {
 
 app.get("/football/game/:fixtureId/:team1/:team2", async (req, res) => {
   const { fixtureId } = req.params;
-  const fixtureCacheKey = `game:${fixtureId}`;
+  const fixtureCacheKey = `game:${fixtureId}:v1`;
 
   const fixtureUrl =
     `${SM_BASE}/fixtures/${fixtureId}?api_token=${SM_TOKEN}` +
@@ -3177,6 +3177,7 @@ app.get("/football/game/:fixtureId/:team1/:team2", async (req, res) => {
   try {
     const includes = [
       "state",
+      "group",
       "aggregate",
       "round",
       "periods",
