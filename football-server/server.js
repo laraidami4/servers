@@ -2415,6 +2415,7 @@ function transformFixtureDateResponse(raw) {
       stage_id: f.stage_id,
       starting_at: f.starting_at ?? null,
       leg: f.leg ?? null,
+      group: f.group ? { name: f.group.name ?? null } : null,
       aggregate: f.aggregate
         ? {
             name: f.aggregate.name ?? null,
@@ -2456,7 +2457,7 @@ app.get("/football/fixture/:date", async (req, res) => {
   const cacheKey = `fixture:date:${raw}`;
   const url =
     `${SM_BASE}/fixtures/date/${isoDate}?api_token=${SM_TOKEN}` +
-    `&per_page=50&include=aggregate;state;periods;participants;scores;venue;league.country&timezone=America/Toronto`;
+    `&per_page=50&include=group;aggregate;state;periods;participants;scores;venue;league.country&timezone=America/Toronto`;
 
   // Serve from cache if still valid under the dynamic TTL
   const entry = cache.get(cacheKey);
@@ -2585,9 +2586,9 @@ function transformFixtureGameResponse(raw) {
   const weatherreport = wr
     ? {
         temperature: wr.temperature
-          ? { day: wr.temperature.day ?? null }
+          ? { day: wr.temperature.day ?? wr.temperature.current ?? null }
           : null,
-        feelslike: wr.feels_like ? { day: wr.feels_like.day ?? null } : null,
+        feelslike: wr.feels_like ? { day: wr.feels_like.day ?? wr.feels_like.current ?? null } : null,
         wind: wr.wind
           ? {
               speed: wr.wind.speed ?? null,
@@ -2737,6 +2738,7 @@ function transformFixtureGameResponse(raw) {
           short_name: f.state.short_name ?? null,
         }
       : null,
+    group: f.group ? { name: f.group.name ?? null } : null,
     aggregate: f.aggregate
       ? { name: f.aggregate.name ?? null, result: f.aggregate.result ?? null }
       : null,
@@ -3141,7 +3143,7 @@ app.get("/football/game/:fixtureId/:team1/:team2", async (req, res) => {
 
   const fixtureUrl =
     `${SM_BASE}/fixtures/${fixtureId}?api_token=${SM_TOKEN}` +
-    `&include=state;aggregate;round;periods;participants;scores;league.country;comments;formations;venue;weatherReport;events;statistics.type;formations;sidelined.player;sidelined.type;sidelined.sideline;lineups.player;lineups.type;lineups.position;lineups.detailedPosition;coaches;referees.referee;lineups.details.type;ballCoordinates&timezone=America/Toronto`;
+    `&include=state;group;aggregate;round;periods;participants;scores;league.country;comments;formations;venue;weatherReport;events;statistics.type;formations;sidelined.player;sidelined.type;sidelined.sideline;lineups.player;lineups.type;lineups.position;lineups.detailedPosition;coaches;referees.referee;lineups.details.type;ballCoordinates&timezone=America/Toronto`;
 
   // Update activity timestamp
   const act = gameActivity.get(fixtureCacheKey);
