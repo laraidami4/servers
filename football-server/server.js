@@ -1605,6 +1605,7 @@ function transformTeamResponse(combined) {
 
   // ── c.txt: team info ──────────────────────────────────────────────────────
   const t = combined.teamInfo?.data;
+  const teamColors = findSapColors(t.name, colorMap);
   const teamInfo = t
     ? {
         id: t.id ?? null,
@@ -1613,6 +1614,8 @@ function transformTeamResponse(combined) {
         image_path: t.image_path ?? null,
         founded: t.founded ?? null,
         last_played_at: t.last_played_at ?? null,
+        colorPrimary: teamColors.colorPrimary,
+        colorSecondary: teamColors.colorSecondary,
         country: t.country
           ? {
               name: t.country.name ?? null,
