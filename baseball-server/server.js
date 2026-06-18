@@ -1907,7 +1907,9 @@ async function processMlbNotificationsTick() {
       gameState.scoringHashes.add(hash);
 
       const desc = String(play?.result?.description || "Scoring play")
-        .split(/(?<!Jr)\.(?=\s)|,/)[0]
+        .replace(/\b([A-Za-z])\.([A-Za-z])\./g, "$1§$2§")
+        .split(/\.|,/)[0]
+        .replace(/§/g, ".")
         .trim();
       const inningText = `(${play?.about?.halfInning === "top" ? "Top" : "Bot"} ${ordinalSuffix(play?.about?.inning || "?")}) ·`;
       // Determine scoring team: top of inning -> away scored, bottom -> home scored
@@ -2635,7 +2637,9 @@ app.post(
 
           const play = scoringPlays[index];
           const desc = String(play?.result?.description || "Scoring play")
-            .split(/(?<!Jr)\.(?=\s)|,/)[0]
+            .replace(/\b([A-Za-z])\.([A-Za-z])\./g, "$1§$2§")
+            .split(/\.|,/)[0]
+            .replace(/§/g, ".")
             .trim();
           const inningText = `(${play?.about?.halfInning === "top" ? "Top" : "Bot"} ${ordinalSuffix(play?.about?.inning || "?")}) ·`;
           const isTop =
