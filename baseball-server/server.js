@@ -1906,11 +1906,15 @@ async function processMlbNotificationsTick() {
       if (!hash || gameState.scoringHashes.has(hash)) continue;
       gameState.scoringHashes.add(hash);
 
-      const desc = String(play?.result?.description || "Scoring play")
-        .replace(/\b([A-Za-z])\.([A-Za-z])\./g, "$1§$2§")
-        .split(/\.|,/)[0]
-        .replace(/§/g, ".")
-        .trim();
+      const result =
+        String(play?.result?.description || "Scoring play")
+          .replace(/\b([A-Za-z])\.([A-Za-z])\./g, "$1§$2§")
+          .replace(/\b(Jr|Sr|Dr|Mr|Mrs|Ms)\./g, "$1§")
+          .match(/^.*?\.(?=\s|$)/g)
+          ?.slice(0, 2)
+          .join("") ?? "Scoring play";
+
+      const desc = result.replace(/§/g, ".").trim();
       const inningText = `(${play?.about?.halfInning === "top" ? "Top" : "Bot"} ${ordinalSuffix(play?.about?.inning || "?")}) ·`;
       // Determine scoring team: top of inning -> away scored, bottom -> home scored
       const isTop = play?.about?.halfInning === "top";
@@ -2636,11 +2640,15 @@ app.post(
           if (index >= scoringPlays.length) index = scoringPlays.length - 1;
 
           const play = scoringPlays[index];
-          const desc = String(play?.result?.description || "Scoring play")
-            .replace(/\b([A-Za-z])\.([A-Za-z])\./g, "$1§$2§")
-            .split(/\.|,/)[0]
-            .replace(/§/g, ".")
-            .trim();
+          const result =
+            String(play?.result?.description || "Scoring play")
+              .replace(/\b([A-Za-z])\.([A-Za-z])\./g, "$1§$2§")
+              .replace(/\b(Jr|Sr|Dr|Mr|Mrs|Ms)\./g, "$1§")
+              .match(/^.*?\.(?=\s|$)/g)
+              ?.slice(0, 2)
+              .join("") ?? "Scoring play";
+
+          const desc = result.replace(/§/g, ".").trim();
           const inningText = `(${play?.about?.halfInning === "top" ? "Top" : "Bot"} ${ordinalSuffix(play?.about?.inning || "?")}) ·`;
           const isTop =
             play?.about?.halfInning === "top" ||

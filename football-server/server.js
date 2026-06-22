@@ -1202,8 +1202,11 @@ function transformLeagueResponse(combined) {
     : null;
 
   const teamOfTheWeek = transformTeamOfTheWeekResponse(combined.teamOfTheWeek);
+  const brackets = combined.brackets
+    ? transformBracketsResponse(combined.brackets)
+    : null;
 
-  return { standings, teamsInSeason, leagueInfo, stageStats, teamOfTheWeek };
+  return { standings, teamsInSeason, leagueInfo, stageStats, teamOfTheWeek, brackets };
 }
 
 // Transforms raw SM team-of-the-week response per 1.txt spec.
@@ -1278,6 +1281,81 @@ function transformTeamRankingsResponse(raw) {
   }));
 }
 
+// Transforms raw SM brackets response per 2.txt spec.
+function transformBracketsResponse(raw) {
+  const stages = Array.isArray(raw?.data?.stages) ? raw.data.stages : [];
+  const edges = Array.isArray(raw?.data?.edges) ? raw.data.edges : [];
+  const colorMap = buildSapColorMap();
+
+  const hasData = stages.length > 0 && edges.length > 0;
+  if (!hasData) return null;
+
+  return {
+    stages: stages.map((stage) => ({
+      stage_id: stage.stage_id ?? null,
+      stage_name: stage.stage_name ?? null,
+      fixtures: Array.isArray(stage.fixtures)
+        ? stage.fixtures.map((f) => ({
+            id: f.id ?? null,
+            name: f.name ?? null,
+            starting_at: f.starting_at ?? null,
+            details: f.details ?? null,
+            state: f.state
+              ? {
+                  state: f.state.state ?? null,
+                  name: f.state.name ?? null,
+                  short_name: f.state.short_name ?? null,
+                }
+              : null,
+            aggregate: f.aggregate
+              ? { name: f.aggregate.name ?? null, result: f.aggregate.result ?? null }
+              : null,
+            venue: f.venue ? { name: f.venue.name ?? null } : null,
+            scores: Array.isArray(f.scores)
+              ? f.scores
+                  .filter((s) => s.description === "CURRENT")
+                  .map((s) => ({
+                    score: s.score
+                      ? {
+                          goals: s.score.goals ?? null,
+                          participant: s.score.participant ?? null,
+                        }
+                      : null,
+                  }))
+              : [],
+            participants: Array.isArray(f.participants)
+              ? f.participants.map((p) => {
+                  const colors = findSapColors(p.name, colorMap);
+                  return {
+                    name: p.name ?? null,
+                    short_code: p.short_code ?? null,
+                    image_path: p.image_path ?? null,
+                    placeholder: p.placeholder ?? null,
+                    colorPrimary: colors.colorPrimary,
+                    colorSecondary: colors.colorSecondary,
+                    meta: p.meta
+                      ? {
+                          location: p.meta.location ?? null,
+                          winner: p.meta.winner ?? null,
+                        }
+                      : null,
+                  };
+                })
+              : [],
+          }))
+        : [],
+    })),
+    edges: edges.map((e) => ({
+      id: e.id ?? null,
+      season_id: e.season_id ?? null,
+      child_fixture_id: e.child_fixture_id ?? null,
+      child_slot: e.child_slot ?? null,
+      parent_fixture_id: e.parent_fixture_id ?? null,
+      parent_outcome: e.parent_outcome ?? null,
+    })),
+  };
+}
+
 // GET /football/rank
 // Fetches team rankings for today's PST date and returns transformed rows per 1.txt.
 app.get("/football/rank", async (_req, res) => {
@@ -1316,7 +1394,7 @@ app.get("/football/rank", async (_req, res) => {
 });
 
 // GET /football/league/:leagueId
-// Fetches 5 SportMonks endpoints in parallel: standings, teams, league info, stage stats, team of the week.
+// Fetches 6 SportMonks endpoints in parallel: standings, teams, league info, stage stats, team of the week, brackets.
 app.get("/football/league/:leagueId", async (req, res) => {
   const leagueId = Number(req.params.leagueId);
   if (!Number.isInteger(leagueId) || leagueId <= 0) {
@@ -1339,8 +1417,8 @@ app.get("/football/league/:leagueId", async (req, res) => {
   const { seasonId, stageId } = meta;
   const cacheKey = `league:${leagueId}`;
 
-  if (cacheValid(cacheKey, TTL_1H)) {
-    setCacheControl(res, TTL_1H);
+  if (cacheValid(cacheKey, TTL_15M)) {
+    setCacheControl(res, TTL_15M);
     return res.json({
       source: "cache",
       data: transformLeagueResponse(cache.get(cacheKey).data),
@@ -1348,7 +1426,7 @@ app.get("/football/league/:leagueId", async (req, res) => {
   }
 
   try {
-    const [standings, teamsInSeason, leagueInfo, stageStats, teamOfTheWeek] =
+    const [standings, teamsInSeason, leagueInfo, stageStats, teamOfTheWeek, brackets] =
       await Promise.all([
         fetchUrl(
           `${SM_BASE}/standings/seasons/${seasonId}?api_token=${SM_TOKEN}` +
@@ -1386,6 +1464,32 @@ app.get("/football/league/:leagueId", async (req, res) => {
             );
             return null;
           }),
+        // Brackets: only fetched when seasonId is available; wrapped in try/catch
+        // so a failure doesn't break the rest of the league data.
+        (async () => {
+          try {
+            const url =
+              `${SM_BASE}/seasons/${seasonId}/brackets?api_token=${SM_TOKEN}` +
+              `&include=state;aggregate;venue;scores;participants`;
+            const data = await fetchUrl(url);
+            // Only include if the response actually has stages and edges
+            if (
+              Array.isArray(data?.data?.stages) &&
+              data.data.stages.length > 0 &&
+              Array.isArray(data?.data?.edges) &&
+              data.data.edges.length > 0
+            ) {
+              return data;
+            }
+            return null;
+          } catch (e) {
+            console.warn(
+              `Brackets failed for season ${seasonId}:`,
+              e?.message || e,
+            );
+            return null;
+          }
+        })(),
       ]);
 
     const combined = {
@@ -1394,11 +1498,12 @@ app.get("/football/league/:leagueId", async (req, res) => {
       leagueInfo,
       stageStats,
       ...(teamOfTheWeek ? { teamOfTheWeek } : {}),
+      ...(brackets ? { brackets } : {}),
     };
 
     cacheSet(cacheKey, combined);
 
-    setCacheControl(res, TTL_1H);
+    setCacheControl(res, TTL_15M);
     res.json({ source: "origin", data: transformLeagueResponse(combined) });
   } catch (err) {
     console.error("League endpoint error:", {
