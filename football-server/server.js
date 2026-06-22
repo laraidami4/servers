@@ -1493,19 +1493,10 @@ app.get("/football/league/:leagueId", async (req, res) => {
       // so a failure doesn't break the rest of the league data.
       (async () => {
         try {
-          seasonId
-            ? (async () => {
-                try {
-                  const data = await fetchUrl(
-                    `${SM_BASE}/seasons/${seasonId}/brackets?api_token=${SM_TOKEN}` +
-                      `&include=state;aggregate;venue;scores;participants`,
-                  );
-                  return data;
-                } catch {
-                  return null;
-                }
-              })()
-            : null;
+          const url =
+            `${SM_BASE}/seasons/${seasonId}/brackets?api_token=${SM_TOKEN}` +
+            `&include=state;aggregate;venue;scores;participants`;
+          const data = await fetchUrl(url);
           // Only include if the response actually has stages and edges
           if (
             Array.isArray(data?.data?.stages) &&
