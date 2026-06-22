@@ -1446,25 +1446,32 @@ app.get("/football/league/:leagueId", async (req, res) => {
       teamOfTheWeek,
       brackets,
     ] = await Promise.all([
-      fetchUrl(
-        `${SM_BASE}/standings/seasons/${seasonId}?api_token=${SM_TOKEN}` +
-          `&include=rule.type;stage;participant;details.type;form;league;group`,
-      ),
-      fetchUrl(
-        `${SM_BASE}/teams/seasons/${seasonId}?api_token=${SM_TOKEN}` +
-          `&include=sidelined.player;sidelined.type;statistics.details.type;players.player;players.detailedPosition;players.position` +
-          `&filters=teamstatisticSeasons:${seasonId}`,
-      ),
+      seasonId
+        ? fetchUrl(
+            `${SM_BASE}/standings/seasons/${seasonId}?api_token=${SM_TOKEN}` +
+              `&include=rule.type;stage;participant;details.type;form;league;group`,
+          )
+        : null,
+
+      seasonId
+        ? fetchUrl(
+            `${SM_BASE}/teams/seasons/${seasonId}?api_token=${SM_TOKEN}` +
+              `&include=sidelined.player;sidelined.type;statistics.details.type;players.player;players.detailedPosition;players.position` +
+              `&filters=teamstatisticSeasons:${seasonId}`,
+          )
+        : null,
+
       fetchUrl(
         `${SM_BASE}/leagues/${leagueId}?api_token=${SM_TOKEN}` +
           `&include=currentSeason;country;latest.round;latest.aggregate;latest.scores;latest.participants;latest.venue;upcoming.round;upcoming.aggregate;upcoming.participants;upcoming.venue&timezone=America/Toronto`,
       ),
+
       stageId
         ? fetchUrl(
             `${SM_BASE}/statistics/stages/${stageId}?api_token=${SM_TOKEN}` +
               `&include=type;participant`,
           )
-        : Promise.resolve(null),
+        : null,
       fetchUrl(
         `${SM_BASE}/team-of-the-week/leagues/${leagueId}/latest?api_token=${SM_TOKEN}` +
           `&include=player.country;team;round`,
@@ -1486,10 +1493,19 @@ app.get("/football/league/:leagueId", async (req, res) => {
       // so a failure doesn't break the rest of the league data.
       (async () => {
         try {
-          const url =
-            `${SM_BASE}/seasons/${seasonId}/brackets?api_token=${SM_TOKEN}` +
-            `&include=state;aggregate;venue;scores;participants`;
-          const data = await fetchUrl(url);
+          seasonId
+            ? (async () => {
+                try {
+                  const data = await fetchUrl(
+                    `${SM_BASE}/seasons/${seasonId}/brackets?api_token=${SM_TOKEN}` +
+                      `&include=state;aggregate;venue;scores;participants`,
+                  );
+                  return data;
+                } catch {
+                  return null;
+                }
+              })()
+            : null;
           // Only include if the response actually has stages and edges
           if (
             Array.isArray(data?.data?.stages) &&
