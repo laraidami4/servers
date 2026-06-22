@@ -644,6 +644,7 @@ const LIVE_SHORT_NAMES = new Set([
   "INPLAY_PEN",
   "ET",
   "PEN",
+  "INT",
 ]);
 
 function isLiveByShortName(fixture) {
