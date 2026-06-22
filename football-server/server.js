@@ -1022,72 +1022,74 @@ function transformLeagueResponse(combined) {
   const teamsRaw = Array.isArray(combined.teamsInSeason?.data)
     ? combined.teamsInSeason.data
     : [];
-  const teamsInSeason = teamsRaw.filter((t) => t.short_code != null).map((t) => {
-    const teamColors = findSapColors(t.name, colorMap);
-    return {
-      id: t.id ?? null,
-      name: t.name ?? null,
-      short_code: t.short_code ?? null,
-      image_path: t.image_path ?? null,
-      colorPrimary: teamColors.colorPrimary,
-      colorSecondary: teamColors.colorSecondary,
-      sidelined: Array.isArray(t.sidelined)
-        ? t.sidelined.map((sl) => ({
-            player_id: sl.player_id ?? null,
-            start_date: sl.start_date ?? null,
-            end_date: sl.end_date ?? null,
-            games_missed: sl.games_missed ?? null,
-            player: sl.player
-              ? {
-                  id: sl.player.id ?? null,
-                  firstname: sl.player.firstname ?? null,
-                  lastname: sl.player.lastname ?? null,
-                  name: sl.player.name ?? null,
-                  display_name: sl.player.display_name ?? null,
-                  image_path: sl.player.image_path ?? null,
-                }
-              : null,
-            type: sl.type ? { name: sl.type.name ?? null } : null,
-          }))
-        : [],
-      statistics: Array.isArray(t.statistics)
-        ? t.statistics.map((s) => ({
-            details: Array.isArray(s.details)
-              ? s.details.map((d) => ({
-                  value: d.value ?? null,
-                  type: d.type
-                    ? {
-                        name: d.type.name ?? null,
-                        stat_group: d.type.stat_group ?? null,
-                      }
-                    : null,
-                }))
-              : [],
-          }))
-        : [],
-      players: Array.isArray(t.players)
-        ? t.players.map((pl) => ({
-            id: pl.player_id ?? null,
-            captain: pl.captain ?? null,
-            jersey_number: pl.jersey_number ?? null,
-            player: pl.player
-              ? {
-                  id: pl.player.id ?? null,
-                  firstname: pl.player.firstname ?? null,
-                  lastname: pl.player.lastname ?? null,
-                  name: pl.player.name ?? null,
-                  display_name: pl.player.display_name ?? null,
-                  image_path: pl.player.image_path ?? null,
-                }
-              : null,
-            detailedposition: pl.detailedposition
-              ? { name: pl.detailedposition.name ?? null }
-              : null,
-            position: pl.position ? { name: pl.position.name ?? null } : null,
-          }))
-        : [],
-    };
-  });
+  const teamsInSeason = teamsRaw
+    .filter((t) => t.short_code != null)
+    .map((t) => {
+      const teamColors = findSapColors(t.name, colorMap);
+      return {
+        id: t.id ?? null,
+        name: t.name ?? null,
+        short_code: t.short_code ?? null,
+        image_path: t.image_path ?? null,
+        colorPrimary: teamColors.colorPrimary,
+        colorSecondary: teamColors.colorSecondary,
+        sidelined: Array.isArray(t.sidelined)
+          ? t.sidelined.map((sl) => ({
+              player_id: sl.player_id ?? null,
+              start_date: sl.start_date ?? null,
+              end_date: sl.end_date ?? null,
+              games_missed: sl.games_missed ?? null,
+              player: sl.player
+                ? {
+                    id: sl.player.id ?? null,
+                    firstname: sl.player.firstname ?? null,
+                    lastname: sl.player.lastname ?? null,
+                    name: sl.player.name ?? null,
+                    display_name: sl.player.display_name ?? null,
+                    image_path: sl.player.image_path ?? null,
+                  }
+                : null,
+              type: sl.type ? { name: sl.type.name ?? null } : null,
+            }))
+          : [],
+        statistics: Array.isArray(t.statistics)
+          ? t.statistics.map((s) => ({
+              details: Array.isArray(s.details)
+                ? s.details.map((d) => ({
+                    value: d.value ?? null,
+                    type: d.type
+                      ? {
+                          name: d.type.name ?? null,
+                          stat_group: d.type.stat_group ?? null,
+                        }
+                      : null,
+                  }))
+                : [],
+            }))
+          : [],
+        players: Array.isArray(t.players)
+          ? t.players.map((pl) => ({
+              id: pl.player_id ?? null,
+              captain: pl.captain ?? null,
+              jersey_number: pl.jersey_number ?? null,
+              player: pl.player
+                ? {
+                    id: pl.player.id ?? null,
+                    firstname: pl.player.firstname ?? null,
+                    lastname: pl.player.lastname ?? null,
+                    name: pl.player.name ?? null,
+                    display_name: pl.player.display_name ?? null,
+                    image_path: pl.player.image_path ?? null,
+                  }
+                : null,
+              detailedposition: pl.detailedposition
+                ? { name: pl.detailedposition.name ?? null }
+                : null,
+              position: pl.position ? { name: pl.position.name ?? null } : null,
+            }))
+          : [],
+      };
+    });
 
   // ── c.txt: league info ─────────────────────────────────────────────────────
   const li = combined.leagueInfo?.data;
@@ -1206,7 +1208,14 @@ function transformLeagueResponse(combined) {
     ? transformBracketsResponse(combined.brackets)
     : null;
 
-  return { standings, teamsInSeason, leagueInfo, stageStats, teamOfTheWeek, brackets };
+  return {
+    standings,
+    teamsInSeason,
+    leagueInfo,
+    stageStats,
+    teamOfTheWeek,
+    brackets,
+  };
 }
 
 // Transforms raw SM team-of-the-week response per 1.txt spec.
@@ -1308,7 +1317,10 @@ function transformBracketsResponse(raw) {
                 }
               : null,
             aggregate: f.aggregate
-              ? { name: f.aggregate.name ?? null, result: f.aggregate.result ?? null }
+              ? {
+                  name: f.aggregate.name ?? null,
+                  result: f.aggregate.result ?? null,
+                }
               : null,
             venue: f.venue ? { name: f.venue.name ?? null } : null,
             scores: Array.isArray(f.scores)
@@ -1426,71 +1438,77 @@ app.get("/football/league/:leagueId", async (req, res) => {
   }
 
   try {
-    const [standings, teamsInSeason, leagueInfo, stageStats, teamOfTheWeek, brackets] =
-      await Promise.all([
-        fetchUrl(
-          `${SM_BASE}/standings/seasons/${seasonId}?api_token=${SM_TOKEN}` +
-            `&include=rule.type;stage;participant;details.type;form;league;group`,
-        ),
-        fetchUrl(
-          `${SM_BASE}/teams/seasons/${seasonId}?api_token=${SM_TOKEN}` +
-            `&include=sidelined.player;sidelined.type;statistics.details.type;players.player;players.detailedPosition;players.position` +
-            `&filters=teamstatisticSeasons:${seasonId}`,
-        ),
-        fetchUrl(
-          `${SM_BASE}/leagues/${leagueId}?api_token=${SM_TOKEN}` +
-            `&include=currentSeason;country;latest.round;latest.aggregate;latest.scores;latest.participants;latest.venue;upcoming.round;upcoming.aggregate;upcoming.participants;upcoming.venue&timezone=America/Toronto`,
-        ),
-        stageId
-          ? fetchUrl(
-              `${SM_BASE}/statistics/stages/${stageId}?api_token=${SM_TOKEN}` +
-                `&include=type;participant`,
-            )
-          : Promise.resolve(null),
-        fetchUrl(
-          `${SM_BASE}/team-of-the-week/leagues/${leagueId}/latest?api_token=${SM_TOKEN}` +
-            `&include=player.country;team;round`,
-        )
-          .then((data) =>
-            data?.message === "The requested endpoint does not exist"
-              ? null
-              : data,
+    const [
+      standings,
+      teamsInSeason,
+      leagueInfo,
+      stageStats,
+      teamOfTheWeek,
+      brackets,
+    ] = await Promise.all([
+      fetchUrl(
+        `${SM_BASE}/standings/seasons/${seasonId}?api_token=${SM_TOKEN}` +
+          `&include=rule.type;stage;participant;details.type;form;league;group`,
+      ),
+      fetchUrl(
+        `${SM_BASE}/teams/seasons/${seasonId}?api_token=${SM_TOKEN}` +
+          `&include=sidelined.player;sidelined.type;statistics.details.type;players.player;players.detailedPosition;players.position` +
+          `&filters=teamstatisticSeasons:${seasonId}`,
+      ),
+      fetchUrl(
+        `${SM_BASE}/leagues/${leagueId}?api_token=${SM_TOKEN}` +
+          `&include=currentSeason;country;latest.round;latest.aggregate;latest.scores;latest.participants;latest.venue;upcoming.round;upcoming.aggregate;upcoming.participants;upcoming.venue&timezone=America/Toronto`,
+      ),
+      stageId
+        ? fetchUrl(
+            `${SM_BASE}/statistics/stages/${stageId}?api_token=${SM_TOKEN}` +
+              `&include=type;participant`,
           )
-          .catch((err) => {
-            console.error(
-              `Team of the Week failed for league ${leagueId}:`,
-              err.response?.status,
-              err.response?.data || err.message,
-            );
-            return null;
-          }),
-        // Brackets: only fetched when seasonId is available; wrapped in try/catch
-        // so a failure doesn't break the rest of the league data.
-        (async () => {
-          try {
-            const url =
-              `${SM_BASE}/seasons/${seasonId}/brackets?api_token=${SM_TOKEN}` +
-              `&include=state;aggregate;venue;scores;participants`;
-            const data = await fetchUrl(url);
-            // Only include if the response actually has stages and edges
-            if (
-              Array.isArray(data?.data?.stages) &&
-              data.data.stages.length > 0 &&
-              Array.isArray(data?.data?.edges) &&
-              data.data.edges.length > 0
-            ) {
-              return data;
-            }
-            return null;
-          } catch (e) {
-            console.warn(
-              `Brackets failed for season ${seasonId}:`,
-              e?.message || e,
-            );
-            return null;
+        : Promise.resolve(null),
+      fetchUrl(
+        `${SM_BASE}/team-of-the-week/leagues/${leagueId}/latest?api_token=${SM_TOKEN}` +
+          `&include=player.country;team;round`,
+      )
+        .then((data) =>
+          data?.message === "The requested endpoint does not exist"
+            ? null
+            : data,
+        )
+        .catch((err) => {
+          console.error(
+            `Team of the Week failed for league ${leagueId}:`,
+            err.response?.status,
+            err.response?.data || err.message,
+          );
+          return null;
+        }),
+      // Brackets: only fetched when seasonId is available; wrapped in try/catch
+      // so a failure doesn't break the rest of the league data.
+      (async () => {
+        try {
+          const url =
+            `${SM_BASE}/seasons/${seasonId}/brackets?api_token=${SM_TOKEN}` +
+            `&include=state;aggregate;venue;scores;participants`;
+          const data = await fetchUrl(url);
+          // Only include if the response actually has stages and edges
+          if (
+            Array.isArray(data?.data?.stages) &&
+            data.data.stages.length > 0 &&
+            Array.isArray(data?.data?.edges) &&
+            data.data.edges.length > 0
+          ) {
+            return data;
           }
-        })(),
-      ]);
+          return null;
+        } catch (e) {
+          console.warn(
+            `Brackets failed for season ${seasonId}:`,
+            e?.message || e,
+          );
+          return null;
+        }
+      })(),
+    ]);
 
     const combined = {
       standings,
@@ -2696,7 +2714,9 @@ function transformFixtureGameResponse(raw) {
         temperature: wr.temperature
           ? { day: wr.temperature.day ?? wr.temperature.current ?? null }
           : null,
-        feelslike: wr.feels_like ? { day: wr.feels_like.day ?? wr.feels_like.current ?? null } : null,
+        feelslike: wr.feels_like
+          ? { day: wr.feels_like.day ?? wr.feels_like.current ?? null }
+          : null,
         wind: wr.wind
           ? {
               speed: wr.wind.speed ?? null,
@@ -5121,7 +5141,9 @@ async function warmCacheTeams() {
     }
     // Filter out gender-neutral placeholder teams (e.g. TBC) before caching
     const filtered = all
-      .filter((item) => (item.gender ?? "").toString().toLowerCase() !== "neutral")
+      .filter(
+        (item) => (item.gender ?? "").toString().toLowerCase() !== "neutral",
+      )
       .filter((item) => item.short_code != null); // Add filter for non-null short_code
     const transformed = filtered.map(transformCacheTeam);
     cacheSet("cache:teams", transformed);
