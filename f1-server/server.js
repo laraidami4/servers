@@ -998,9 +998,11 @@ f1.get("/meetings", async (req, res) => {
       `${BASE_URL}session_result`,
       TTL_1H,
     ).catch(() => {});
-    await getCachedWithTTL("drivers", getDriversUrlWithMeetingKeys(), TTL_1H).catch(
-      () => {},
-    );
+    await getCachedWithTTL(
+      "drivers",
+      getDriversUrlWithMeetingKeys(),
+      TTL_1H,
+    ).catch(() => {});
 
     const sessionsArr = normalizeArray(cache.get("sessions")?.data);
     const resultsArr = normalizeArray(cache.get("session_result")?.data);
@@ -1101,9 +1103,11 @@ f1.get("/meeting/:meeting_key", async (req, res) => {
       `${BASE_URL}session_result`,
       TTL_1H,
     ).catch(() => {});
-    await getCachedWithTTL("drivers", getDriversUrlWithMeetingKeys(), TTL_1H).catch(
-      () => {},
-    );
+    await getCachedWithTTL(
+      "drivers",
+      getDriversUrlWithMeetingKeys(),
+      TTL_1H,
+    ).catch(() => {});
 
     const meetingsArr = normalizeArray(cache.get("meetings")?.data);
     const sessionsArr = normalizeArray(cache.get("sessions")?.data);
