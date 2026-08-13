@@ -14,7 +14,7 @@ app.use("/nascar", nascar);
 
 const PORT = process.env.PORT || 3000;
 
-const BASE_URL = "https://api.openf1.or/v1/";
+const BASE_URL = "https://api.openf1.org/v1/";
 
 const cache = new Map();
 const TTL_MS = 30 * 60 * 1000; // 30 minutes
@@ -584,16 +584,29 @@ function waitForTimeout(ms) {
 }
 
 async function warmRacingDateCaches() {
+  const currentYear = new Date().getFullYear();
+  // Fetch meetings and sessions first (with year filter), then drivers using meeting keys
+  await getCachedWithTTL(
+    "meetings",
+    `${BASE_URL}meetings?year=${currentYear}`,
+    TTL_6H,
+  ).catch(() => {});
+  await getCachedWithTTL(
+    "sessions",
+    `${BASE_URL}sessions?year=${currentYear}`,
+    TTL_6H,
+  ).catch(() => {});
+
   const warmupTasks = [
     refreshSessionResultCacheIfLive(),
-    getCachedWithTTL("meetings", `${BASE_URL}meetings`, TTL_6H).catch(() => {}),
-    getCachedWithTTL("sessions", `${BASE_URL}sessions`, TTL_6H).catch(() => {}),
     getCachedWithTTL(
       "session_result",
       `${BASE_URL}session_result`,
       TTL_1H,
     ).catch(() => {}),
-    getCachedWithTTL("drivers", `${BASE_URL}drivers`, TTL_1H).catch(() => {}),
+    getCachedWithTTL("drivers", getDriversUrlWithMeetingKeys(), TTL_1H).catch(
+      () => {},
+    ),
     getCachedWithTTL(
       "nascar_races",
       `https://cf.nascar.com/cacher/${new Date().getFullYear()}/race_list_basic.json`,
@@ -729,6 +742,20 @@ function ensureRefreshInterval(key, url, ttlMs) {
     );
     refreshIntervals.set(key, id);
   }
+}
+
+function getDriversUrlWithMeetingKeys() {
+  const meetingsEntry = cache.get("meetings");
+  const meetingsArr = normalizeArray(meetingsEntry?.data);
+  const meetingKeys = meetingsArr
+    .map((m) => m?.meeting_key)
+    .filter((k) => k != null)
+    .map(String);
+  if (meetingKeys.length === 0) {
+    return `${BASE_URL}drivers`;
+  }
+  const params = meetingKeys.map((k) => `meeting_key=${k}`).join("&");
+  return `${BASE_URL}drivers?${params}`;
 }
 
 // Start a watcher that polls session_result for a specific session_key until
@@ -900,10 +927,19 @@ function startLiveRefreshMonitor() {
 
 f1.get("/drivers", async (req, res) => {
   try {
-    const qs = new URLSearchParams(req.query).toString();
-    const path = qs ? `drivers?${qs}` : "drivers";
-    const url = `${BASE_URL}${path}`;
-    const key = path;
+    // Ensure meetings are cached so we have meeting keys
+    const currentYear = new Date().getFullYear();
+    await getCachedWithTTL(
+      "meetings",
+      `${BASE_URL}meetings?year=${currentYear}`,
+      TTL_6H,
+    ).catch(() => {});
+    // Build base URL with meeting keys from cached meetings
+    const baseUrl = getDriversUrlWithMeetingKeys();
+    // Merge any additional user query params
+    const userQs = new URLSearchParams(req.query).toString();
+    const url = userQs ? `${baseUrl}&${userQs}` : baseUrl;
+    const key = `drivers:${url}`;
 
     const { data, fromCache } = await getCached(key, url);
 
@@ -939,8 +975,11 @@ f1.get("/drivers", async (req, res) => {
 // Meetings endpoint - cache for 6 hours, remove country_key
 f1.get("/meetings", async (req, res) => {
   try {
-    const qs = new URLSearchParams(req.query).toString();
-    const path = qs ? `meetings?${qs}` : "meetings";
+    const currentYear = new Date().getFullYear();
+    const userQs = new URLSearchParams(req.query);
+    if (!userQs.has("year")) userQs.set("year", currentYear);
+    const qs = userQs.toString();
+    const path = qs ? `meetings?${qs}` : `meetings?year=${currentYear}`;
     const url = `${BASE_URL}${path}`;
     const key = path;
 
@@ -949,15 +988,17 @@ f1.get("/meetings", async (req, res) => {
     arr = removeKeyFromArray(arr, "country_key");
 
     // ensure underlying caches exist so we can compute winners
-    await getCachedWithTTL("sessions", `${BASE_URL}sessions`, TTL_6H).catch(
-      () => {},
-    );
+    await getCachedWithTTL(
+      "sessions",
+      `${BASE_URL}sessions?year=${currentYear}`,
+      TTL_6H,
+    ).catch(() => {});
     await getCachedWithTTL(
       "session_result",
       `${BASE_URL}session_result`,
       TTL_1H,
     ).catch(() => {});
-    await getCachedWithTTL("drivers", `${BASE_URL}drivers`, TTL_1H).catch(
+    await getCachedWithTTL("drivers", getDriversUrlWithMeetingKeys(), TTL_1H).catch(
       () => {},
     );
 
@@ -1044,18 +1085,23 @@ f1.get("/meeting/:meeting_key", async (req, res) => {
     await refreshSessionResultCacheIfLive();
 
     // ensure caches
-    await getCachedWithTTL("meetings", `${BASE_URL}meetings`, TTL_6H).catch(
-      () => {},
-    );
-    await getCachedWithTTL("sessions", `${BASE_URL}sessions`, TTL_6H).catch(
-      () => {},
-    );
+    const currentYear = new Date().getFullYear();
+    await getCachedWithTTL(
+      "meetings",
+      `${BASE_URL}meetings?year=${currentYear}`,
+      TTL_6H,
+    ).catch(() => {});
+    await getCachedWithTTL(
+      "sessions",
+      `${BASE_URL}sessions?year=${currentYear}`,
+      TTL_6H,
+    ).catch(() => {});
     await getCachedWithTTL(
       "session_result",
       `${BASE_URL}session_result`,
       TTL_1H,
     ).catch(() => {});
-    await getCachedWithTTL("drivers", `${BASE_URL}drivers`, TTL_1H).catch(
+    await getCachedWithTTL("drivers", getDriversUrlWithMeetingKeys(), TTL_1H).catch(
       () => {},
     );
 
@@ -1400,9 +1446,11 @@ f1.get("/driver/:driver_number", async (req, res) => {
       TTL_1H,
       async () => {
         // ensure underlying caches exist
-        await getCachedWithTTL("drivers", `${BASE_URL}drivers`, TTL_1H).catch(
-          () => {},
-        );
+        await getCachedWithTTL(
+          "drivers",
+          getDriversUrlWithMeetingKeys(),
+          TTL_1H,
+        ).catch(() => {});
         await getCachedWithTTL(
           "championship_drivers",
           `${BASE_URL}championship_drivers`,
@@ -1508,9 +1556,11 @@ f1.get("/team/:team_name", async (req, res) => {
       key,
       TTL_1H,
       async () => {
-        await getCachedWithTTL("drivers", `${BASE_URL}drivers`, TTL_1H).catch(
-          () => {},
-        );
+        await getCachedWithTTL(
+          "drivers",
+          getDriversUrlWithMeetingKeys(),
+          TTL_1H,
+        ).catch(() => {});
         await getCachedWithTTL(
           "championship_drivers",
           `${BASE_URL}championship_drivers`,
@@ -3026,8 +3076,11 @@ f1.get("/session/:session_key/:status?", async (req, res) => {
 // Sessions endpoint - cache for 6 hours, remove circuit_key and country_key
 f1.get("/sessions", async (req, res) => {
   try {
-    const qs = new URLSearchParams(req.query).toString();
-    const path = qs ? `sessions?${qs}` : "sessions";
+    const currentYear = new Date().getFullYear();
+    const userQs = new URLSearchParams(req.query);
+    if (!userQs.has("year")) userQs.set("year", currentYear);
+    const qs = userQs.toString();
+    const path = qs ? `sessions?${qs}` : `sessions?year=${currentYear}`;
     const url = `${BASE_URL}${path}`;
     const key = path;
 
@@ -4139,12 +4192,23 @@ async function warmUpAll() {
     ensureRefreshInterval(key, url, ttl);
   };
 
-  // fetch meetings and sessions first
-  await warmupEntry("meetings", `${BASE_URL}meetings`, TTL_6H);
-  await warmupEntry("sessions", `${BASE_URL}sessions`, TTL_6H);
+  const currentYear = new Date().getFullYear();
 
-  // fetch drivers and championship & session data
-  await warmupEntry("drivers", `${BASE_URL}drivers`, TTL_MS);
+  // fetch meetings and sessions first (with year filter)
+  await warmupEntry(
+    "meetings",
+    `${BASE_URL}meetings?year=${currentYear}`,
+    TTL_6H,
+  );
+  await warmupEntry(
+    "sessions",
+    `${BASE_URL}sessions?year=${currentYear}`,
+    TTL_6H,
+  );
+
+  // fetch drivers using meeting keys from cached meetings
+  const driversUrl = getDriversUrlWithMeetingKeys();
+  await warmupEntry("drivers", driversUrl, TTL_MS);
   await warmupEntry(
     "championship_drivers",
     `${BASE_URL}championship_drivers`,
@@ -4159,7 +4223,6 @@ async function warmUpAll() {
   await warmupEntry("starting_grid", `${BASE_URL}starting_grid`, TTL_1H);
 
   // fetch NASCAR data on startup
-  const currentYear = new Date().getFullYear();
   await warmupEntry(
     "nascar_races",
     `https://cf.nascar.com/cacher/${currentYear}/race_list_basic.json`,

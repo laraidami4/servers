@@ -431,7 +431,7 @@ const SM_TOKEN =
   process.env.SM_TOKEN ||
   "mObDMf7t47JiK4x4LNCRRkEWrHkd2XiZZvJuvYXR2gUDh4nbHlTVtA15H2JV";
 const SM_BASE = "https://api.sportmonks.com/v3/football";
-const SAP_BASE = "https://v1.football.sportsapipro.com";
+const SAP_BASE = "https://api.sportsapipro.com/v1/football";
 const SAP_KEY = process.env.SAP_KEY || null;
 
 // ─── TTL constants ────────────────────────────────────────────────────────────
@@ -517,7 +517,7 @@ async function warmSapStandings() {
   await Promise.allSettled(
     SAP_COMPETITION_IDS.map(async (compId) => {
       const key = `sap:standings:${compId}`;
-      const url = `${SAP_BASE}/standings?competitions=${compId}`;
+      const url = `${SAP_BASE}/competition/${compId}/standings`;
       try {
         await fetchAndCache(key, url, { "x-api-key": SAP_KEY });
         // auto-refresh every 24 h
