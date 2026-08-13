@@ -601,10 +601,10 @@ async function warmRacingDateCaches() {
     refreshSessionResultCacheIfLive(),
     getCachedWithTTL(
       "session_result",
-      `${BASE_URL}session_result`,
+      getUrlWithMeetingKeys("session_result"),
       TTL_1H,
     ).catch(() => {}),
-    getCachedWithTTL("drivers", getDriversUrlWithMeetingKeys(), TTL_1H).catch(
+    getCachedWithTTL("drivers", getUrlWithMeetingKeys("drivers"), TTL_1H).catch(
       () => {},
     ),
     getCachedWithTTL(
@@ -744,7 +744,7 @@ function ensureRefreshInterval(key, url, ttlMs) {
   }
 }
 
-function getDriversUrlWithMeetingKeys() {
+function getUrlWithMeetingKeys(endpoint) {
   const meetingsEntry = cache.get("meetings");
   const meetingsArr = normalizeArray(meetingsEntry?.data);
   const meetingKeys = meetingsArr
@@ -752,10 +752,10 @@ function getDriversUrlWithMeetingKeys() {
     .filter((k) => k != null)
     .map(String);
   if (meetingKeys.length === 0) {
-    return `${BASE_URL}drivers`;
+    return `${BASE_URL}${endpoint}`;
   }
   const params = meetingKeys.map((k) => `meeting_key=${k}`).join("&");
-  return `${BASE_URL}drivers?${params}`;
+  return `${BASE_URL}${endpoint}?${params}`;
 }
 
 // Start a watcher that polls session_result for a specific session_key until
@@ -871,9 +871,10 @@ function hasAnyLiveSession() {
 async function refreshSessionResultCacheIfLive() {
   try {
     if (activeLiveClients.size > 0 || hasAnyLiveSession()) {
-      await fetchAndCache("session_result", `${BASE_URL}session_result`).catch(
-        () => {},
-      );
+      await fetchAndCache(
+        "session_result",
+        getUrlWithMeetingKeys("session_result"),
+      ).catch(() => {});
     }
   } catch (e) {}
 }
@@ -905,8 +906,8 @@ function startLiveRefreshMonitor() {
         }
       }
 
-      const sessionResultUrl = `${BASE_URL}session_result`;
-      const startingGridUrl = `${BASE_URL}starting_grid`;
+      const sessionResultUrl = getUrlWithMeetingKeys("session_result");
+      const startingGridUrl = getUrlWithMeetingKeys("starting_grid");
       if (anyLive) {
         updateRefreshInterval(
           "session_result",
@@ -935,7 +936,7 @@ f1.get("/drivers", async (req, res) => {
       TTL_6H,
     ).catch(() => {});
     // Build base URL with meeting keys from cached meetings
-    const baseUrl = getDriversUrlWithMeetingKeys();
+    const baseUrl = getUrlWithMeetingKeys("drivers");
     // Merge any additional user query params
     const userQs = new URLSearchParams(req.query).toString();
     const url = userQs ? `${baseUrl}&${userQs}` : baseUrl;
@@ -995,12 +996,12 @@ f1.get("/meetings", async (req, res) => {
     ).catch(() => {});
     await getCachedWithTTL(
       "session_result",
-      `${BASE_URL}session_result`,
+      getUrlWithMeetingKeys("session_result"),
       TTL_1H,
     ).catch(() => {});
     await getCachedWithTTL(
       "drivers",
-      getDriversUrlWithMeetingKeys(),
+      getUrlWithMeetingKeys("drivers"),
       TTL_1H,
     ).catch(() => {});
 
@@ -1100,12 +1101,12 @@ f1.get("/meeting/:meeting_key", async (req, res) => {
     ).catch(() => {});
     await getCachedWithTTL(
       "session_result",
-      `${BASE_URL}session_result`,
+      getUrlWithMeetingKeys("session_result"),
       TTL_1H,
     ).catch(() => {});
     await getCachedWithTTL(
       "drivers",
-      getDriversUrlWithMeetingKeys(),
+      getUrlWithMeetingKeys("drivers"),
       TTL_1H,
     ).catch(() => {});
 
@@ -1452,22 +1453,22 @@ f1.get("/driver/:driver_number", async (req, res) => {
         // ensure underlying caches exist
         await getCachedWithTTL(
           "drivers",
-          getDriversUrlWithMeetingKeys(),
+          getUrlWithMeetingKeys("drivers"),
           TTL_1H,
         ).catch(() => {});
         await getCachedWithTTL(
           "championship_drivers",
-          `${BASE_URL}championship_drivers`,
+          getUrlWithMeetingKeys("championship_drivers"),
           TTL_1H,
         ).catch(() => {});
         await getCachedWithTTL(
           "starting_grid",
-          `${BASE_URL}starting_grid`,
+          getUrlWithMeetingKeys("starting_grid"),
           TTL_1H,
         ).catch(() => {});
         await getCachedWithTTL(
           "session_result",
-          `${BASE_URL}session_result`,
+          getUrlWithMeetingKeys("session_result"),
           TTL_1H,
         ).catch(() => {});
 
@@ -1562,22 +1563,22 @@ f1.get("/team/:team_name", async (req, res) => {
       async () => {
         await getCachedWithTTL(
           "drivers",
-          getDriversUrlWithMeetingKeys(),
+          getUrlWithMeetingKeys("drivers"),
           TTL_1H,
         ).catch(() => {});
         await getCachedWithTTL(
           "championship_drivers",
-          `${BASE_URL}championship_drivers`,
+          getUrlWithMeetingKeys("championship_drivers"),
           TTL_1H,
         ).catch(() => {});
         await getCachedWithTTL(
           "starting_grid",
-          `${BASE_URL}starting_grid`,
+          getUrlWithMeetingKeys("starting_grid"),
           TTL_1H,
         ).catch(() => {});
         await getCachedWithTTL(
           "session_result",
-          `${BASE_URL}session_result`,
+          getUrlWithMeetingKeys("session_result"),
           TTL_1H,
         ).catch(() => {});
 
@@ -2913,7 +2914,7 @@ f1.get("/session/:session_key/:status?", async (req, res) => {
           try {
             const sr = await getCachedWithTTL(
               "session_result",
-              `${BASE_URL}session_result`,
+              getUrlWithMeetingKeys("session_result"),
               TTL_1H,
             ).catch(() => ({ data: [] }));
             resultsArr = normalizeArray(sr.data);
@@ -3118,7 +3119,7 @@ f1.get("/debug/session_results/:session_key?", async (req, res) => {
       // try to prime cache from upstream
       const sr = await getCachedWithTTL(
         "session_result",
-        `${BASE_URL}session_result`,
+        getUrlWithMeetingKeys("session_result"),
         TTL_1H,
       ).catch(() => ({ data: [] }));
       arr = normalizeArray(sr.data);
@@ -3212,11 +3213,20 @@ f1.get("/championship_drivers", async (req, res) => {
   try {
     const { q, keys } = buildMeetingQuery(req.query);
     const params = new URLSearchParams(q);
-    // append meeting_key params
-    for (const k of keys) params.append("meeting_key", k);
-    const qs = params.toString();
-    const path = qs ? `championship_drivers?${qs}` : "championship_drivers";
-    const url = `${BASE_URL}${path}`;
+    let path, url;
+    if (keys.length > 0) {
+      // User specified meeting_keys - use them
+      for (const k of keys) params.append("meeting_key", k);
+      const qs = params.toString();
+      path = `championship_drivers?${qs}`;
+      url = `${BASE_URL}${path}`;
+    } else {
+      // No meeting_key specified - default to all cached meeting keys
+      const baseUrl = getUrlWithMeetingKeys("championship_drivers");
+      const otherQs = params.toString();
+      url = otherQs ? `${baseUrl}&${otherQs}` : baseUrl;
+      path = url.replace(BASE_URL, "");
+    }
     const key = path;
 
     const { data, fromCache } = await getCachedWithTTL(key, url, TTL_1H);
@@ -3272,10 +3282,20 @@ f1.get("/championship_teams", async (req, res) => {
   try {
     const { q, keys } = buildMeetingQuery(req.query);
     const params = new URLSearchParams(q);
-    for (const k of keys) params.append("meeting_key", k);
-    const qs = params.toString();
-    const path = qs ? `championship_teams?${qs}` : "championship_teams";
-    const url = `${BASE_URL}${path}`;
+    let path, url;
+    if (keys.length > 0) {
+      // User specified meeting_keys - use them
+      for (const k of keys) params.append("meeting_key", k);
+      const qs = params.toString();
+      path = `championship_teams?${qs}`;
+      url = `${BASE_URL}${path}`;
+    } else {
+      // No meeting_key specified - default to all cached meeting keys
+      const baseUrl = getUrlWithMeetingKeys("championship_teams");
+      const otherQs = params.toString();
+      url = otherQs ? `${baseUrl}&${otherQs}` : baseUrl;
+      path = url.replace(BASE_URL, "");
+    }
     const key = path;
 
     const { data, fromCache } = await getCachedWithTTL(key, url, TTL_1H);
@@ -3338,12 +3358,12 @@ f1.get("/standings", async (req, res) => {
     // ensure cached source data exists
     await getCachedWithTTL(
       "championship_drivers",
-      `${BASE_URL}championship_drivers`,
+      getUrlWithMeetingKeys("championship_drivers"),
       TTL_1H,
     ).catch(() => {});
     await getCachedWithTTL(
       "championship_teams",
-      `${BASE_URL}championship_teams`,
+      getUrlWithMeetingKeys("championship_teams"),
       TTL_1H,
     ).catch(() => {});
 
@@ -3452,9 +3472,11 @@ function groupByMeetingThenSession(arr) {
 
 f1.get("/session_result", async (req, res) => {
   try {
-    const qs = new URLSearchParams(req.query).toString();
-    const path = qs ? `session_result?${qs}` : "session_result";
-    const url = `${BASE_URL}${path}`;
+    // Always include meeting_key defaults from cached meetings
+    const baseUrl = getUrlWithMeetingKeys("session_result");
+    const userQs = new URLSearchParams(req.query).toString();
+    const url = userQs ? `${baseUrl}&${userQs}` : baseUrl;
+    const path = url.replace(BASE_URL, "");
     const key = path;
 
     await refreshSessionResultCacheIfLive();
@@ -3518,9 +3540,11 @@ f1.get("/session_result", async (req, res) => {
 
 f1.get("/starting_grid", async (req, res) => {
   try {
-    const qs = new URLSearchParams(req.query).toString();
-    const path = qs ? `starting_grid?${qs}` : "starting_grid";
-    const url = `${BASE_URL}${path}`;
+    // Always include meeting_key defaults from cached meetings
+    const baseUrl = getUrlWithMeetingKeys("starting_grid");
+    const userQs = new URLSearchParams(req.query).toString();
+    const url = userQs ? `${baseUrl}&${userQs}` : baseUrl;
+    const path = url.replace(BASE_URL, "");
     const key = path;
 
     const { data, fromCache } = await getCachedWithTTL(key, url, TTL_1H);
@@ -4211,20 +4235,28 @@ async function warmUpAll() {
   );
 
   // fetch drivers using meeting keys from cached meetings
-  const driversUrl = getDriversUrlWithMeetingKeys();
+  const driversUrl = getUrlWithMeetingKeys("drivers");
   await warmupEntry("drivers", driversUrl, TTL_MS);
   await warmupEntry(
     "championship_drivers",
-    `${BASE_URL}championship_drivers`,
+    getUrlWithMeetingKeys("championship_drivers"),
     TTL_1H,
   );
   await warmupEntry(
     "championship_teams",
-    `${BASE_URL}championship_teams`,
+    getUrlWithMeetingKeys("championship_teams"),
     TTL_1H,
   );
-  await warmupEntry("session_result", `${BASE_URL}session_result`, TTL_1H);
-  await warmupEntry("starting_grid", `${BASE_URL}starting_grid`, TTL_1H);
+  await warmupEntry(
+    "session_result",
+    getUrlWithMeetingKeys("session_result"),
+    TTL_1H,
+  );
+  await warmupEntry(
+    "starting_grid",
+    getUrlWithMeetingKeys("starting_grid"),
+    TTL_1H,
+  );
 
   // fetch NASCAR data on startup
   await warmupEntry(
