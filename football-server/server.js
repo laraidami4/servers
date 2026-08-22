@@ -429,10 +429,10 @@ const pushMetrics = {
 // ─── API credentials (prefer env vars so tokens aren't baked in) ──────────────
 const SM_TOKEN =
   process.env.SM_TOKEN ||
-  "mObDMf7t47JiK4x4LNCRRkEWrHkd2XiZZvJuvYXR2gUDh4nbHlTVtA15H2JV";
+  "k8ek8vOSGMpqfLkwymcVKwzjnuVduDEuW1H6LjNjbegEhM45QcTcYrmM6avJ";
 const SM_BASE = "https://api.sportmonks.com/v3/football";
 const SAP_BASE = "https://api.sportsapipro.com/v1/football";
-const SAP_KEY = process.env.SAP_KEY || null;
+const SAP_KEY = process.env.SAP_KEY || "6ae28853-d4a1-432c-b4d8-c912421794fa";
 
 // ─── TTL constants ────────────────────────────────────────────────────────────
 const TTL_20S = 20 * 1000;
@@ -476,8 +476,23 @@ const SAP_TO_SM_TEAM_NAME_MAP = Object.freeze({
 });
 
 async function fetchUrl(url, headers = {}) {
-  const response = await axios.get(url, { timeout: 30000, headers });
-  return response.data;
+  const start = Date.now();
+  try {
+    const response = await axios.get(url, { timeout: 30000, headers });
+    const elapsed = Date.now() - start;
+    // Log SAP API calls with more detail
+    if (url.includes('sportsapipro')) {
+      const dataKeys = response.data ? Object.keys(response.data).join(', ') : 'null';
+      const dataType = Array.isArray(response.data) ? `array[${response.data.length}]` : typeof response.data;
+    }
+    return response.data;
+  } catch (err) {
+    const elapsed = Date.now() - start;
+    if (url.includes('sportsapipro')) {
+      console.error(`[SAP] fetchUrl FAILED after ${elapsed}ms:`, err.message, err.response?.status, err.response?.data ? JSON.stringify(err.response.data).substring(0, 500) : '');
+    }
+    throw err;
+  }
 }
 
 function cacheSet(key, data) {
@@ -519,8 +534,9 @@ async function warmSapStandings() {
       const key = `sap:standings:${compId}`;
       const url = `${SAP_BASE}/competition/${compId}/standings`;
       try {
-        await fetchAndCache(key, url, { "x-api-key": SAP_KEY });
-        // auto-refresh every 24 h
+        const data = await fetchAndCache(key, url, { "x-api-key": SAP_KEY });
+        const standings = data?.data?.standings;
+        
         const id = setInterval(
           () =>
             fetchAndCache(key, url, { "x-api-key": SAP_KEY }).catch((e) =>
@@ -530,7 +546,7 @@ async function warmSapStandings() {
         );
         refreshIntervals.set(key, id);
       } catch (err) {
-        console.warn(`[startup] SAP standings ${compId} failed:`, err.message);
+        console.warn(`[SAP] warmSapStandings: FAILED ${key}:`, err.message, err.response?.status, err.response?.data ? JSON.stringify(err.response.data).substring(0, 500) : '');
       }
     }),
   );
@@ -2403,8 +2419,11 @@ function buildSapColorMap() {
 
   for (const compId of SAP_COMPETITION_IDS) {
     const entry = cache.get(`sap:standings:${compId}`);
-    if (!entry?.data?.standings) continue;
-    for (const stage of entry.data.standings) {
+    const standings = entry?.data?.data?.standings;
+    if (!standings) {
+      continue;
+    }
+    for (const stage of standings) {
       if (!Array.isArray(stage.rows)) continue;
       for (const row of stage.rows) {
         const c = row.competitor;
@@ -4952,9 +4971,12 @@ app.get("/football/cache-sap", (_req, res) => {
 
   for (const compId of SAP_COMPETITION_IDS) {
     const entry = cache.get(`sap:standings:${compId}`);
-    if (!entry?.data?.standings) continue;
+    const standings = entry?.data?.data?.standings;
+    if (!standings) {
+      continue;
+    }
 
-    for (const stage of entry.data.standings) {
+    for (const stage of standings) {
       if (!Array.isArray(stage.rows)) continue;
       for (const row of stage.rows) {
         const c = row.competitor;
@@ -5181,7 +5203,9 @@ async function warmCacheFixturesFetch() {
 
 function enrichCacheFixtures() {
   const rawEntry = cache.get("cache:fixtures:raw");
-  if (!rawEntry?.data) return;
+  if (!rawEntry?.data) {
+    return;
+  }
   const teamsNameMap = buildTeamsNameMap();
   const colorMap = buildSapColorMap();
   const enriched = rawEntry.data.map((f) =>
@@ -5317,13 +5341,19 @@ app.get("/", (_req, res) => {
 async function init() {
   // All independent fetches in parallel — SAP standings, league meta, and the
   // three bulk cache endpoints (1-3.txt) run simultaneously.
-  await Promise.allSettled([
+  const results = await Promise.allSettled([
     warmSapStandings(),
     warmLeagueMeta(),
     warmCacheLeagues(),
     warmCacheTeams(),
     warmCacheFixturesFetch(),
   ]);
+
+  // Log SAP cache state after warm-up
+  for (const compId of SAP_COMPETITION_IDS) {
+    const entry = cache.get(`sap:standings:${compId}`);
+    }
+
   // Enrich fixtures with team data + colors (requires phase above to complete).
   enrichCacheFixtures();
 
