@@ -705,7 +705,10 @@ let subscriberCache = { data: null, fetchedAt: 0 };
 
 async function getCachedSubscribers() {
   const now = Date.now();
-  if (subscriberCache.data && now - subscriberCache.fetchedAt < MLB_SUBSCRIBER_CACHE_MS) {
+  if (
+    subscriberCache.data &&
+    now - subscriberCache.fetchedAt < MLB_SUBSCRIBER_CACHE_MS
+  ) {
     return subscriberCache.data;
   }
   const data = await loadMlbFavSubscribers();
@@ -1799,8 +1802,11 @@ function startMlbLiveActivityLoop() {
 
   function scheduleNext() {
     // Use longer interval when no tokens are registered (idle mode)
-    const hasTokens = liveActivityTokens.size > 0 || liveActivityTokenOwners.size > 0;
-    const intervalMs = hasTokens ? MLB_LIVE_ACTIVITY_POLL_MS : MLB_LIVE_ACTIVITY_IDLE_POLL_MS;
+    const hasTokens =
+      liveActivityTokens.size > 0 || liveActivityTokenOwners.size > 0;
+    const intervalMs = hasTokens
+      ? MLB_LIVE_ACTIVITY_POLL_MS
+      : MLB_LIVE_ACTIVITY_IDLE_POLL_MS;
 
     if (liveActivityIntervalId) {
       clearTimeout(liveActivityIntervalId);
@@ -2054,13 +2060,24 @@ function startMlbNotificationsLoop() {
       // Calculate ms until 2am PST (when date rolls over)
       const now = new Date();
       const pst = getDatePartsInTimeZone(now, "America/Los_Angeles");
-      const tomorrow2am = new Date(Date.UTC(pst.year, pst.month - 1, pst.day + 1, 10, 0, 0)); // 10 UTC = 2am PST
-      const msUntilTomorrow = Math.max(tomorrow2am.getTime() - Date.now(), MLB_NOTIF_IDLE_POLL_MS);
+      const tomorrow2am = new Date(
+        Date.UTC(pst.year, pst.month - 1, pst.day + 1, 10, 0, 0),
+      ); // 10 UTC = 2am PST
+      const msUntilTomorrow = Math.max(
+        tomorrow2am.getTime() - Date.now(),
+        MLB_NOTIF_IDLE_POLL_MS,
+      );
       intervalMs = Math.min(msUntilTomorrow, MLB_NOTIF_IDLE_POLL_MS);
-    } else if (mlbNotifState.suspendUntilMs && Date.now() < mlbNotifState.suspendUntilMs) {
+    } else if (
+      mlbNotifState.suspendUntilMs &&
+      Date.now() < mlbNotifState.suspendUntilMs
+    ) {
       // Suspended until a future time (e.g., before first game starts)
       const msUntilResume = mlbNotifState.suspendUntilMs - Date.now();
-      intervalMs = Math.max(Math.min(msUntilResume, MLB_NOTIF_IDLE_POLL_MS), MLB_NOTIF_POLL_MS);
+      intervalMs = Math.max(
+        Math.min(msUntilResume, MLB_NOTIF_IDLE_POLL_MS),
+        MLB_NOTIF_POLL_MS,
+      );
     }
 
     if (notifIntervalId) {
