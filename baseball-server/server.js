@@ -92,6 +92,7 @@ const liveActivityTokens = new Map();
 const liveActivityTokenOwners = new Map();
 const liveActivityBaseProps = new Map();
 const MLB_LIVE_ACTIVITY_POLL_MS = 5000;
+const MLB_LIVE_ACTIVITY_IDLE_POLL_MS = 60 * 1000; // 60s when no tokens registered
 const MLB_LIVE_ACTIVITY_DISMISSAL_MS = 15 * 60 * 1000;
 const MLB_LIVE_ACTIVITY_HYDRATE = "linescore,previousPlay";
 const MLB_LIVE_ACTIVITY_FIELDS =
@@ -676,8 +677,41 @@ const mlbNotifState = {
 };
 
 const MLB_NOTIF_POLL_MS = 5000;
+const MLB_NOTIF_IDLE_POLL_MS = 5 * 60 * 1000; // 5 min when no games or all finished
 const MLB_NOTIF_PRE_START_MS = 30 * 60 * 1000;
 const MLB_NOTIF_IDLE_RETRY_MS = 5 * 60 * 1000;
+const MLB_SUBSCRIBER_CACHE_MS = 60 * 1000; // cache subscribers for 60s
+
+// Shared schedule cache to avoid duplicate fetches between loops
+let sharedScheduleCache = { dateStr: null, data: null, fetchedAt: 0 };
+const SHARED_SCHEDULE_TTL_MS = 5000; // 5s shared cache
+
+async function getSharedSchedule(dateStr) {
+  const now = Date.now();
+  if (
+    sharedScheduleCache.dateStr === dateStr &&
+    sharedScheduleCache.data &&
+    now - sharedScheduleCache.fetchedAt < SHARED_SCHEDULE_TTL_MS
+  ) {
+    return sharedScheduleCache.data;
+  }
+  const payload = await fetchMlbScheduleForNotifications(dateStr);
+  sharedScheduleCache = { dateStr, data: payload, fetchedAt: now };
+  return payload;
+}
+
+// Subscriber cache to avoid querying Supabase every 5 seconds
+let subscriberCache = { data: null, fetchedAt: 0 };
+
+async function getCachedSubscribers() {
+  const now = Date.now();
+  if (subscriberCache.data && now - subscriberCache.fetchedAt < MLB_SUBSCRIBER_CACHE_MS) {
+    return subscriberCache.data;
+  }
+  const data = await loadMlbFavSubscribers();
+  subscriberCache = { data, fetchedAt: now };
+  return data;
+}
 
 function getDatePartsInTimeZone(date, timeZone) {
   const parts = new Intl.DateTimeFormat("en-US", {
@@ -1687,8 +1721,13 @@ async function fetchMlbGameForLiveActivity(gamePk) {
 
 // Modify processMlbLiveActivityTick to add debug logging:
 async function processMlbLiveActivityTick() {
+  // Skip entirely if no live activity tokens are registered across all games
+  if (liveActivityTokens.size === 0 && liveActivityTokenOwners.size === 0) {
+    return;
+  }
+
   const dateStr = getMlbNotifDatePst();
-  const payload = await fetchMlbScheduleForNotifications(dateStr);
+  const payload = await getSharedSchedule(dateStr);
   const games = flattenGames(payload);
 
   for (const game of games) {
@@ -1756,11 +1795,26 @@ async function processMlbLiveActivityTick() {
 }
 
 function startMlbLiveActivityLoop() {
-  setInterval(async () => {
-    try {
-      await processMlbLiveActivityTick();
-    } catch (error) {}
-  }, MLB_LIVE_ACTIVITY_POLL_MS);
+  let liveActivityIntervalId = null;
+
+  function scheduleNext() {
+    // Use longer interval when no tokens are registered (idle mode)
+    const hasTokens = liveActivityTokens.size > 0 || liveActivityTokenOwners.size > 0;
+    const intervalMs = hasTokens ? MLB_LIVE_ACTIVITY_POLL_MS : MLB_LIVE_ACTIVITY_IDLE_POLL_MS;
+
+    if (liveActivityIntervalId) {
+      clearTimeout(liveActivityIntervalId);
+    }
+
+    liveActivityIntervalId = setTimeout(async () => {
+      try {
+        await processMlbLiveActivityTick();
+      } catch (error) {}
+      scheduleNext(); // schedule next iteration with potentially different interval
+    }, intervalMs);
+  }
+
+  scheduleNext();
 }
 
 function ordinalSuffix(n) {
@@ -1786,9 +1840,9 @@ async function processMlbNotificationsTick() {
     return;
   }
 
-  const payload = await fetchMlbScheduleForNotifications(dateStr);
+  const payload = await getSharedSchedule(dateStr);
   const games = flattenGames(payload);
-  const subscribers = await loadMlbFavSubscribers();
+  const subscribers = await getCachedSubscribers();
 
   logMlbSubscriberTokens(`tick:${dateStr}`, subscribers);
 
@@ -1915,6 +1969,8 @@ async function processMlbNotificationsTick() {
           .join("") ?? "Scoring play";
 
       const desc = result.replace(/§/g, ".").trim();
+      // Skip notifications with malformed text
+      if (/[{|$]/.test(desc)) continue;
       const inningText = `(${play?.about?.halfInning === "top" ? "Top" : "Bot"} ${ordinalSuffix(play?.about?.inning || "?")}) ·`;
       // Determine scoring team: top of inning -> away scored, bottom -> home scored
       const isTop = play?.about?.halfInning === "top";
@@ -1987,13 +2043,41 @@ async function processMlbNotificationsTick() {
 
 function startMlbNotificationsLoop() {
   logMlbSubscriberTokens("startup");
-  setInterval(async () => {
-    try {
-      await processMlbNotificationsTick();
-    } catch (e) {
-      console.warn("[sports-favs] notification tick failed:", e.message);
+  let notifIntervalId = null;
+
+  function scheduleNext() {
+    // Determine next poll interval based on current state
+    let intervalMs = MLB_NOTIF_POLL_MS; // default: 5s (live games)
+
+    if (mlbNotifState.doneForDate) {
+      // All games finished for today — check again tomorrow
+      // Calculate ms until 2am PST (when date rolls over)
+      const now = new Date();
+      const pst = getDatePartsInTimeZone(now, "America/Los_Angeles");
+      const tomorrow2am = new Date(Date.UTC(pst.year, pst.month - 1, pst.day + 1, 10, 0, 0)); // 10 UTC = 2am PST
+      const msUntilTomorrow = Math.max(tomorrow2am.getTime() - Date.now(), MLB_NOTIF_IDLE_POLL_MS);
+      intervalMs = Math.min(msUntilTomorrow, MLB_NOTIF_IDLE_POLL_MS);
+    } else if (mlbNotifState.suspendUntilMs && Date.now() < mlbNotifState.suspendUntilMs) {
+      // Suspended until a future time (e.g., before first game starts)
+      const msUntilResume = mlbNotifState.suspendUntilMs - Date.now();
+      intervalMs = Math.max(Math.min(msUntilResume, MLB_NOTIF_IDLE_POLL_MS), MLB_NOTIF_POLL_MS);
     }
-  }, MLB_NOTIF_POLL_MS);
+
+    if (notifIntervalId) {
+      clearTimeout(notifIntervalId);
+    }
+
+    notifIntervalId = setTimeout(async () => {
+      try {
+        await processMlbNotificationsTick();
+      } catch (e) {
+        console.warn("[sports-favs] notification tick failed:", e.message);
+      }
+      scheduleNext(); // schedule next with potentially different interval
+    }, intervalMs);
+  }
+
+  scheduleNext();
 }
 
 // Embedded explicit allowedTree literal to preserve selected starred fields
@@ -2649,6 +2733,8 @@ app.post(
               .join("") ?? "Scoring play";
 
           const desc = result.replace(/§/g, ".").trim();
+          // Sanitize malformed text
+          const safeDesc = /[{|$]/.test(desc) ? "Scoring play" : desc;
           const inningText = `(${play?.about?.halfInning === "top" ? "Top" : "Bot"} ${ordinalSuffix(play?.about?.inning || "?")}) ·`;
           const isTop =
             play?.about?.halfInning === "top" ||
@@ -2668,7 +2754,7 @@ app.post(
             to: expoPushToken,
             sound: "default",
             title,
-            body: `${inningText} ${desc}`,
+            body: `${inningText} ${safeDesc}`,
             data: { sport: "mlb", gamePk, type: "mlb_scoring_play" },
           });
         }
