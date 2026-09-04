@@ -34,8 +34,10 @@ const OPEN_F1_RESTRICTION_MSG = "Live F1 session in progress";
 function isOpenF1RestrictionError(err) {
   try {
     const detail = String(err?.response?.data?.detail || err?.message || "");
+    // Only match the specific OpenF1 live-session restriction message.
+    // Do NOT broad-match any 403 — that would swallow rate-limits, bad
+    // requests, etc. and cause the server to serve stale cached data.
     if (detail.includes(OPEN_F1_RESTRICTION_MSG)) return true;
-    if (err?.response?.status === 403 && detail.length > 0) return true;
   } catch (e) {}
   return false;
 }
