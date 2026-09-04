@@ -25,6 +25,54 @@ const refreshIntervals = new Map();
 const activeLiveClients = new Map(); // sessionKey -> { lastActive: number, timeoutId }
 const ACTIVE_CLIENT_TIMEOUT_MS = 30 * 1000; // consider client inactive after 30s
 
+// --- OpenF1 live-session restriction handling ---
+let openF1Restricted = false;
+let openF1RecoveryTimer = null;
+const OPEN_F1_RECOVERY_INTERVAL_MS = 5 * 60 * 1000; // poll every 5 minutes
+const OPEN_F1_RESTRICTION_MSG = "Live F1 session in progress";
+
+function isOpenF1RestrictionError(err) {
+  try {
+    const detail = String(err?.response?.data?.detail || err?.message || "");
+    if (detail.includes(OPEN_F1_RESTRICTION_MSG)) return true;
+    if (err?.response?.status === 403 && detail.length > 0) return true;
+  } catch (e) {}
+  return false;
+}
+
+function startOpenF1Recovery() {
+  if (openF1RecoveryTimer) return; // already running
+  openF1Restricted = true;
+  console.log(
+    "[openf1-recovery] API restricted (live session). Starting 5-min recovery polling.",
+  );
+
+  openF1RecoveryTimer = setInterval(async () => {
+    try {
+      const testUrl = `${BASE_URL}sessions?year=${new Date().getFullYear()}`;
+      await axios.get(testUrl, { timeout: 10000 });
+      // success — API is back
+      console.log(
+        "[openf1-recovery] API available again. Refreshing all caches.",
+      );
+      openF1Restricted = false;
+      clearInterval(openF1RecoveryTimer);
+      openF1RecoveryTimer = null;
+      await warmUpAll();
+      console.log("[openf1-recovery] Cache refresh complete.");
+    } catch (err) {
+      if (isOpenF1RestrictionError(err)) {
+        console.log("[openf1-recovery] Still restricted. Retry in 5 minutes.");
+      } else {
+        console.warn(
+          "[openf1-recovery] Test fetch error (non-restriction):",
+          err.message,
+        );
+      }
+    }
+  }, OPEN_F1_RECOVERY_INTERVAL_MS);
+}
+
 function markSessionActive(sessionKey) {
   try {
     const now = Date.now();
@@ -465,11 +513,37 @@ function buildPositionIntervals({
 async function fetchAndCache(key, url) {
   try {
     const r = await axios.get(url, { timeout: 10000 });
+    // If we previously were restricted, clear the flag now
+    if (openF1Restricted) {
+      console.log("[fetchAndCache] OpenF1 API appears available again.");
+      openF1Restricted = false;
+      if (openF1RecoveryTimer) {
+        clearInterval(openF1RecoveryTimer);
+        openF1RecoveryTimer = null;
+      }
+    }
     const payload = r.data;
     cache.set(key, { data: payload, fetchedAt: Date.now() });
     console.log(`Fetched and cached ${key}`);
     return { data: payload, fromCache: false };
   } catch (err) {
+    // Detect OpenF1 live-session restriction
+    if (isOpenF1RestrictionError(err)) {
+      console.warn(
+        `[fetchAndCache] OpenF1 restricted for ${key}: ${err?.response?.data?.detail || err.message}`,
+      );
+      // Preserve existing cached data — don't overwrite with error
+      const existing = cache.get(key);
+      if (existing) {
+        console.log(`[fetchAndCache] Preserving cached data for ${key}`);
+        existing.fetchedAt = Date.now(); // reset age so callers see it as fresh
+        startOpenF1Recovery();
+        return { data: existing.data, fromCache: true };
+      }
+      // No existing cache — start recovery but still throw
+      startOpenF1Recovery();
+      throw err;
+    }
     console.error(`Error fetching ${url}:`, err.message);
     throw err;
   }
@@ -508,6 +582,20 @@ async function fetchAndCacheWithRetry(key, url, opts = {}) {
         return { data: payload, fromCache: false };
       }
     } catch (err) {
+      // If OpenF1 is restricted, don't waste time retrying — fail fast
+      if (isOpenF1RestrictionError(err)) {
+        console.warn(
+          `[fetchAndCacheWithRetry] OpenF1 restricted for ${key}, skipping retries`,
+        );
+        const existing = cache.get(key);
+        if (existing) {
+          existing.fetchedAt = Date.now();
+          startOpenF1Recovery();
+          return { data: existing.data, fromCache: true };
+        }
+        startOpenF1Recovery();
+        throw err;
+      }
       console.warn(`Transient fetch error for ${url}: ${err.message}`);
       if (Date.now() - start >= maxWaitMs) throw err;
     }
@@ -810,6 +898,16 @@ function watchSessionResultUntilChanged(sessionKey, prevSnapshot, opts = {}) {
           return;
         }
       } catch (e) {
+        // If OpenF1 is restricted, stop watching and start recovery
+        if (isOpenF1RestrictionError(e)) {
+          console.warn(
+            `watchSessionResultUntilChanged: OpenF1 restricted, stopping watch for ${sessionKey}`,
+          );
+          clearInterval(id);
+          refreshIntervals.delete(key);
+          startOpenF1Recovery();
+          return;
+        }
         console.warn(
           `watchSessionResultUntilChanged: fetch error for ${sessionKey}: ${e.message}`,
         );
@@ -4211,10 +4309,12 @@ nascar.get("/race/:race_id/:status?", async (req, res) => {
 });
 
 async function warmUpAll() {
+  let restrictionDetected = false;
   const warmupEntry = async (key, url, ttl) => {
     try {
       await fetchAndCache(key, url);
     } catch (e) {
+      if (isOpenF1RestrictionError(e)) restrictionDetected = true;
       console.warn(`Warm-up fetch failed for ${key}:`, e?.message || e);
     }
     ensureRefreshInterval(key, url, ttl);
@@ -4274,6 +4374,12 @@ async function warmUpAll() {
     "https://cf.nascar.com/cacher/tracks.json",
     TTL_6H,
   );
+
+  if (restrictionDetected) {
+    console.log(
+      "[warmUpAll] OpenF1 restriction detected during warm-up. Recovery will auto-start.",
+    );
+  }
 }
 
 app.listen(PORT, async () => {
