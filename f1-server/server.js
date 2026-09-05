@@ -60,6 +60,14 @@ function startOpenF1Recovery() {
       openF1Restricted = false;
       clearInterval(openF1RecoveryTimer);
       openF1RecoveryTimer = null;
+      // Evict all session-scoped caches so they get rebuilt from fresh
+      // global data (meetings, sessions, drivers, session_result, etc.)
+      // on the next request. Without this, stale assembled session data
+      // that was cached before/during the restriction would be served
+      // indefinitely.
+      for (const key of cache.keys()) {
+        if (key.startsWith("session:")) cache.delete(key);
+      }
       await warmUpAll();
       console.log("[openf1-recovery] Cache refresh complete.");
     } catch (err) {
@@ -534,13 +542,16 @@ async function fetchAndCache(key, url) {
       console.warn(
         `[fetchAndCache] OpenF1 restricted for ${key}: ${err?.response?.data?.detail || err.message}`,
       );
-      // Preserve existing cached data — don't overwrite with error
+      // Preserve existing cached data — don't overwrite with error.
+      // Do NOT reset fetchedAt; let the age grow naturally so stale data
+      // isn't served perpetually after the restriction lifts.
       const existing = cache.get(key);
       if (existing) {
-        console.log(`[fetchAndCache] Preserving cached data for ${key}`);
-        existing.fetchedAt = Date.now(); // reset age so callers see it as fresh
+        console.log(
+          `[fetchAndCache] Preserving stale cached data for ${key} (age ${Date.now() - existing.fetchedAt}ms)`,
+        );
         startOpenF1Recovery();
-        return { data: existing.data, fromCache: true };
+        return { data: existing.data, fromCache: true, restricted: true };
       }
       // No existing cache — start recovery but still throw
       startOpenF1Recovery();
@@ -589,11 +600,11 @@ async function fetchAndCacheWithRetry(key, url, opts = {}) {
         console.warn(
           `[fetchAndCacheWithRetry] OpenF1 restricted for ${key}, skipping retries`,
         );
+        // Do NOT reset fetchedAt — let the age grow naturally
         const existing = cache.get(key);
         if (existing) {
-          existing.fetchedAt = Date.now();
           startOpenF1Recovery();
-          return { data: existing.data, fromCache: true };
+          return { data: existing.data, fromCache: true, restricted: true };
         }
         startOpenF1Recovery();
         throw err;
@@ -2635,8 +2646,12 @@ async function buildAndCacheSession(sessionKey, options = {}) {
       },
     };
 
-    // cache assembled
-    cache.set(cacheKey, { data: assembled, fetchedAt: Date.now() });
+    // cache assembled. If we're under restriction, carry over the old fetchedAt
+    // so the TTL expires naturally and stale data isn't served forever.
+    const oldEntry = cache.get(cacheKey);
+    const assembledFetchedAt =
+      openF1Restricted && oldEntry ? oldEntry.fetchedAt : Date.now();
+    cache.set(cacheKey, { data: assembled, fetchedAt: assembledFetchedAt });
     // If the session has finished but session_result appears incomplete (no winner),
     // start a background watcher to keep polling the upstream session_result until
     // new data appears (or until a longer timeout). This prevents the server from
