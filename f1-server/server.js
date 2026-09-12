@@ -30,6 +30,16 @@ let openF1Restricted = false;
 let openF1RecoveryTimer = null;
 const OPEN_F1_RECOVERY_INTERVAL_MS = 5 * 60 * 1000; // poll every 5 minutes
 const OPEN_F1_RESTRICTION_MSG = "Live F1 session in progress";
+const RESTRICTION_TTL_MS = 5 * 60 * 1000; // cap all TTLs at 5 min when restricted
+
+// Cap TTL to RESTRICTION_TTL_MS when we know OpenF1 is restricted.
+// This ensures cached data is rechecked quickly once the restriction lifts.
+function capTTLForRestriction(baseTtlMs) {
+  if (openF1Restricted && baseTtlMs > RESTRICTION_TTL_MS) {
+    return RESTRICTION_TTL_MS;
+  }
+  return baseTtlMs;
+}
 
 function isOpenF1RestrictionError(err) {
   try {
@@ -618,20 +628,22 @@ async function fetchAndCacheWithRetry(key, url, opts = {}) {
 }
 
 async function getCached(key, url) {
+  const effectiveTtl = capTTLForRestriction(TTL_MS);
   const entry = cache.get(key);
   if (entry) {
     const age = Date.now() - entry.fetchedAt;
-    if (age < TTL_MS) return { data: entry.data, fromCache: true };
+    if (age < effectiveTtl) return { data: entry.data, fromCache: true };
   }
   return await fetchAndCache(key, url);
 }
 
 // variant that accepts custom TTL
 async function getCachedWithTTL(key, url, ttlMs) {
+  const effectiveTtl = capTTLForRestriction(ttlMs);
   const entry = cache.get(key);
   if (entry) {
     const age = Date.now() - entry.fetchedAt;
-    if (age < ttlMs) return { data: entry.data, fromCache: true };
+    if (age < effectiveTtl) return { data: entry.data, fromCache: true };
   }
   // For session_result we prefer to retry the upstream until non-empty (short wait),
   // For `session_result` we previously retried up to 30s to wait for upstream
@@ -1540,8 +1552,9 @@ app.get("/racing/date/:date?", async (req, res) => {
 
 // --- computed cache helper for driver/team endpoints ---
 async function getComputedCached(key, ttlMs, builder) {
+  const effectiveTtl = capTTLForRestriction(ttlMs);
   const entry = cache.get(key);
-  if (entry && entry.computed && Date.now() - entry.fetchedAt < ttlMs) {
+  if (entry && entry.computed && Date.now() - entry.fetchedAt < effectiveTtl) {
     return { data: entry.data, fromCache: true };
   }
   const data = await builder();
@@ -1784,12 +1797,16 @@ function computeSessionTTLFromDates(dateStartStr, dateEndStr) {
   const now = Date.now();
   const start = dateStartStr ? new Date(dateStartStr).getTime() : null;
   const end = dateEndStr ? new Date(dateEndStr).getTime() : null;
-  if (!start || !end) return TTL_1H; // fallback
+  if (!start || !end) return capTTLForRestriction(TTL_1H); // fallback
   const beforeStart15 = start - 15 * 60 * 1000;
   const afterEnd15 = end + 15 * 60 * 1000;
-  if (now < beforeStart15) return 30 * 60 * 1000; // 30 minutes
-  if (now >= beforeStart15 && now <= afterEnd15) return 5 * 1000; // live window: 5 seconds
-  return 24 * 60 * 60 * 1000; // finished: 24 hours
+  let baseTtl;
+  if (now < beforeStart15)
+    baseTtl = 30 * 60 * 1000; // 30 minutes
+  else if (now >= beforeStart15 && now <= afterEnd15)
+    baseTtl = 5 * 1000; // live window: 5 seconds
+  else baseTtl = 24 * 60 * 60 * 1000; // finished: 24 hours
+  return capTTLForRestriction(baseTtl);
 }
 
 async function buildAndCacheSession(sessionKey, options = {}) {
