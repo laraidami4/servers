@@ -2,6 +2,9 @@ const express = require("express");
 const axios = require("axios");
 const cors = require("cors");
 const compression = require("compression");
+try {
+  require("dotenv").config();
+} catch (e) {}
 
 const app = express();
 app.use(cors());
@@ -24,6 +27,75 @@ const refreshIntervals = new Map();
 // track active live requestors per session to avoid polling when nobody is watching
 const activeLiveClients = new Map(); // sessionKey -> { lastActive: number, timeoutId }
 const ACTIVE_CLIENT_TIMEOUT_MS = 30 * 1000; // consider client inactive after 30s
+
+// --- OpenF1 OAuth2 token management ---
+const OPENF1_USERNAME = process.env.OPENF1_USERNAME || "dlaraiyetan2@gmail.com";
+const OPENF1_PASSWORD = process.env.OPENF1_PASSWORD || "LUF8ApHlS48ygFM9";
+let openF1AccessToken = null;
+let openF1TokenExpiresAt = 0;
+let openF1TokenPromise = null;
+
+function isOpenF1Url(url) {
+  return typeof url === "string" && url.startsWith(BASE_URL);
+}
+
+async function refreshOpenF1Token() {
+  if (!OPENF1_USERNAME || !OPENF1_PASSWORD) {
+    console.warn(
+      "[openf1-auth] Missing OPENF1_USERNAME or OPENF1_PASSWORD env vars.",
+    );
+    return null;
+  }
+  try {
+    const resp = await axios.post(
+      "https://api.openf1.org/token",
+      `username=${encodeURIComponent(OPENF1_USERNAME)}&password=${encodeURIComponent(OPENF1_PASSWORD)}`,
+      {
+        headers: { "Content-Type": "application/x-www-form-urlencoded" },
+        timeout: 10000,
+      },
+    );
+    if (resp.status === 200 && resp.data?.access_token) {
+      openF1AccessToken = resp.data.access_token;
+      const expiresIn = Number(resp.data.expires_in) || 3600;
+      openF1TokenExpiresAt = Date.now() + expiresIn * 1000;
+      console.log(`[openf1-auth] Token refreshed, expires in ${expiresIn}s`);
+      return openF1AccessToken;
+    }
+  } catch (e) {
+    console.warn("[openf1-auth] Token refresh failed:", e.message);
+  }
+  return null;
+}
+
+async function getOpenF1Token() {
+  // Return cached token if still valid (with 5-min safety buffer)
+  if (openF1AccessToken && Date.now() < openF1TokenExpiresAt - 5 * 60 * 1000) {
+    return openF1AccessToken;
+  }
+  // Deduplicate concurrent refresh attempts
+  if (!openF1TokenPromise) {
+    openF1TokenPromise = refreshOpenF1Token().finally(() => {
+      openF1TokenPromise = null;
+    });
+  }
+  return openF1TokenPromise;
+}
+
+// Authenticated axios.get wrapper for OpenF1 URLs.
+// Non-OpenF1 URLs (e.g. cf.nascar.com) are passed through unchanged.
+async function f1Get(url, config = {}) {
+  if (isOpenF1Url(url)) {
+    const token = await getOpenF1Token();
+    if (token) {
+      config.headers = {
+        ...(config.headers || {}),
+        Authorization: `Bearer ${token}`,
+      };
+    }
+  }
+  return axios.get(url, config);
+}
 
 // --- OpenF1 live-session restriction handling ---
 let openF1Restricted = false;
@@ -62,7 +134,7 @@ function startOpenF1Recovery() {
   openF1RecoveryTimer = setInterval(async () => {
     try {
       const testUrl = `${BASE_URL}sessions?year=${new Date().getFullYear()}`;
-      await axios.get(testUrl, { timeout: 10000 });
+      await f1Get(testUrl, { timeout: 10000 });
       // success — API is back
       console.log(
         "[openf1-recovery] API available again. Refreshing all caches.",
@@ -332,9 +404,13 @@ function buildPositionIntervals({
   positionsArr,
   raceControlArr,
   startingGridArr,
+  lapsArr,
 }) {
   const positionsMap = Object.create(null);
   const normalizeLapNumber = (value) => {
+    // Guard against Number(null) === 0 and Number("") === 0, which would
+    // otherwise turn a missing lap number into a bogus lap 0.
+    if (value === null || value === undefined || value === "") return null;
     const parsed = Number(value);
     return Number.isFinite(parsed) ? parsed : null;
   };
@@ -348,12 +424,6 @@ function buildPositionIntervals({
     .sort((a, b) => a.ms - b.ms);
   const hasRaceControl = raceControlDates.length > 0;
 
-  const firstLap =
-    raceControlDates.length > 0 ? Number(raceControlDates[0].lap_number) : null;
-  const lastLap =
-    raceControlDates.length > 0
-      ? Number(raceControlDates[raceControlDates.length - 1].lap_number)
-      : null;
   const findRaceControlLap = (ms) => {
     if (ms == null || raceControlDates.length === 0) return null;
     let best = null;
@@ -367,6 +437,63 @@ function buildPositionIntervals({
     }
     return best ? normalizeLapNumber(best.lap_number) : null;
   };
+
+  // --- per-driver lap timelines from the `laps` resource ---
+  // Each entry maps a lap number to the moment that lap started for the driver.
+  // This is the authoritative source for deciding which lap a position snapshot
+  // belongs to (far more accurate than the nearest race-control message).
+  const lapTimelineByDriver = Object.create(null);
+  for (const lap of Array.isArray(lapsArr) ? lapsArr : []) {
+    const dn = String(
+      lap?.driver_number ?? lap?.driverNumber ?? lap?.driver ?? "",
+    );
+    if (!dn) continue;
+    const lapNum = normalizeLapNumber(
+      lap?.lap_number ?? lap?.lapNumber ?? lap?.lap ?? null,
+    );
+    const ms = parseDateMs(
+      lap?.date_start || lap?.dateStart || lap?.date || null,
+    );
+    if (lapNum == null || ms == null) continue;
+    if (!lapTimelineByDriver[dn]) lapTimelineByDriver[dn] = [];
+    lapTimelineByDriver[dn].push({ lap: lapNum, ms });
+  }
+  for (const dn of Object.keys(lapTimelineByDriver)) {
+    lapTimelineByDriver[dn].sort((a, b) => a.ms - b.ms);
+  }
+
+  // Resolve the lap number for a position snapshot timestamp for a given driver.
+  // Prefers the driver's own lap timing; falls back to race-control markers,
+  // then to the snapshot's ordinal index.
+  const resolveLap = (driverNumber, ms, fallbackIndex) => {
+    const timeline = lapTimelineByDriver[driverNumber];
+    if (timeline && timeline.length > 0 && ms != null) {
+      let lap = null;
+      for (const entry of timeline) {
+        if (entry.ms <= ms) lap = entry.lap;
+        else break;
+      }
+      // Snapshot taken before the driver's first recorded lap → treat as lap 1.
+      if (lap == null) lap = timeline[0].lap;
+      return lap;
+    }
+    if (hasRaceControl) return findRaceControlLap(ms);
+    return fallbackIndex != null ? fallbackIndex + 1 : null;
+  };
+
+  // --- overall lap range (prefer lap timing, fall back to race control) ---
+  let firstLap = null;
+  let lastLap = null;
+  for (const dn of Object.keys(lapTimelineByDriver)) {
+    for (const entry of lapTimelineByDriver[dn]) {
+      if (firstLap == null || entry.lap < firstLap) firstLap = entry.lap;
+      if (lastLap == null || entry.lap > lastLap) lastLap = entry.lap;
+    }
+  }
+  if (firstLap == null && hasRaceControl) {
+    firstLap = Number(raceControlDates[0].lap_number);
+    lastLap = Number(raceControlDates[raceControlDates.length - 1].lap_number);
+  }
 
   const startingGridMap = Object.create(null);
   for (const row of Array.isArray(startingGridArr) ? startingGridArr : []) {
@@ -428,9 +555,7 @@ function buildPositionIntervals({
         row?.lap_number ?? row?.lapNumber ?? row?.lap ?? null,
       );
       const snapshotLap =
-        explicitLap ??
-        (hasRaceControl ? findRaceControlLap(snapshotMs) : null) ??
-        (hasRaceControl ? null : index + 1);
+        explicitLap ?? resolveLap(driverNumber, snapshotMs, index);
       const position =
         row?.position ?? row?.position_current ?? row?.pos ?? null;
       if (snapshotLap == null || position == null) return;
@@ -532,7 +657,7 @@ function buildPositionIntervals({
 
 async function fetchAndCache(key, url) {
   try {
-    const r = await axios.get(url, { timeout: 10000 });
+    const r = await f1Get(url, { timeout: 10000 });
     // If we previously were restricted, clear the flag now
     if (openF1Restricted) {
       console.log("[fetchAndCache] OpenF1 API appears available again.");
@@ -579,7 +704,7 @@ async function fetchAndCacheWithRetry(key, url, opts = {}) {
 
   while (true) {
     try {
-      const r = await axios.get(url, { timeout: 10000 });
+      const r = await f1Get(url, { timeout: 10000 });
       const payload = r.data;
 
       // Consider payload non-empty if it's an array with length > 0,
@@ -888,7 +1013,7 @@ function watchSessionResultUntilChanged(sessionKey, prevSnapshot, opts = {}) {
 
     const id = setInterval(async () => {
       try {
-        const r = await axios.get(url, { timeout: 10000 });
+        const r = await f1Get(url, { timeout: 10000 });
         const payload = r.data || null;
 
         // Normalize to comparable form: JSON stringify of array or object
@@ -2254,6 +2379,7 @@ async function buildAndCacheSession(sessionKey, options = {}) {
       positionsArr: resources.position || [],
       raceControlArr: resources.race_control || [],
       startingGridArr: starting_grid || [],
+      lapsArr: resources.laps || [],
     });
 
     // --- build laps map per driver: last valid lap + fastest lap and fastest st_speed ---
