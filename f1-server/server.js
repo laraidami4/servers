@@ -28,6 +28,8 @@ const refreshIntervals = new Map();
 // track active live requestors per session to avoid polling when nobody is watching
 const activeLiveClients = new Map(); // sessionKey -> { lastActive: number, timeoutId }
 const ACTIVE_CLIENT_TIMEOUT_MS = 30 * 1000; // consider client inactive after 30s
+// dedupe concurrent session rebuilds so we don't queue duplicate request sets
+const sessionBuildsInFlight = new Map(); // cacheKey -> Promise
 
 // --- OpenF1 OAuth2 token management ---
 const OPENF1_USERNAME = process.env.OPENF1_USERNAME || "dlaraiyetan2@gmail.com";
@@ -88,8 +90,17 @@ async function getOpenF1Token() {
 // OpenF1 REST call through a single scheduler so we never exceed those limits,
 // and so higher-priority (user-facing / live) requests jump ahead of
 // lower-priority (background warm-up / refresh) ones.
-const RATE_LIMIT_PER_SEC = 6;
-const RATE_LIMIT_PER_MIN = 60;
+//
+// We deliberately stay UNDER the published limits (4/s, 40/min) because
+// OpenF1's limiter is strict, counts the token POST, and rejects bursts even
+// when the per-second count is legal. We also space dispatches out with a
+// minimum gap instead of firing a burst.
+const RATE_LIMIT_PER_SEC = 4;
+const RATE_LIMIT_PER_MIN = 40;
+// 4 req/s => 250ms between requests; we use 400ms for a comfortable margin.
+const MIN_DISPATCH_GAP_MS = 400;
+// When OpenF1 returns 429 we pause the whole queue for this long before retrying.
+const RATE_LIMIT_COOLDOWN_MS = 10 * 1000;
 
 // Priority levels (lower number = higher priority).
 const PRIORITY = {
@@ -105,6 +116,10 @@ const rateLimiter = {
   queue: [],
   running: false,
   seq: 0,
+  // timestamp of the last dispatch (for the minimum-gap smoothing)
+  lastDispatchAt: 0,
+  // if set, the queue is paused until this timestamp (used after a 429)
+  cooldownUntil: 0,
 
   // Remove timestamps older than 60s (the widest window we track).
   prune(now) {
@@ -117,9 +132,17 @@ const rateLimiter = {
   // How long (ms) we must wait before another request is allowed.
   waitTime(now) {
     this.prune(now);
+    let wait = 0;
+    // Honour any active cooldown (e.g. after a 429).
+    if (this.cooldownUntil > now) {
+      wait = Math.max(wait, this.cooldownUntil - now);
+    }
+    // Enforce a minimum gap between dispatches to avoid same-instant bursts.
+    if (this.lastDispatchAt > 0) {
+      wait = Math.max(wait, this.lastDispatchAt + MIN_DISPATCH_GAP_MS - now);
+    }
     const lastSec = this.recent.filter((t) => t > now - 1000);
     const lastMin = this.recent;
-    let wait = 0;
     if (lastSec.length >= RATE_LIMIT_PER_SEC) {
       // wait until the oldest request in the last second falls out of window
       wait = Math.max(wait, lastSec[0] + 1000 - now);
@@ -128,6 +151,18 @@ const rateLimiter = {
       wait = Math.max(wait, lastMin[0] + 60 * 1000 - now);
     }
     return Math.max(0, wait);
+  },
+
+  // Called when OpenF1 returns 429: pause the queue. We deliberately do NOT
+  // clear `recent` — forgetting the requests we just made would make the
+  // limiter think it has budget again and immediately re-fire into the same
+  // 429. Keeping the window intact lets it drain naturally during the cooldown.
+  applyCooldown() {
+    const now = Date.now();
+    this.cooldownUntil = Math.max(
+      this.cooldownUntil,
+      now + RATE_LIMIT_COOLDOWN_MS,
+    );
   },
 
   enqueue(task) {
@@ -149,7 +184,8 @@ const rateLimiter = {
           continue;
         }
         const task = this.queue.shift();
-        this.recent.push(Date.now());
+        this.lastDispatchAt = Date.now();
+        this.recent.push(this.lastDispatchAt);
         // Run the task; don't let one failure stall the queue.
         Promise.resolve()
           .then(() => task.run())
@@ -174,19 +210,42 @@ function scheduleOpenF1(run, priority = PRIORITY.NORMAL) {
   });
 }
 
+function isRateLimitError(err) {
+  return err?.response?.status === 429;
+}
+
 // Authenticated axios.get wrapper for OpenF1 URLs.
 // Non-OpenF1 URLs (e.g. cf.nascar.com) are passed through unchanged and are
 // NOT rate limited (the OpenF1 limits don't apply to them).
+// On a 429 we apply a global cooldown (which pauses the whole queue) and retry.
 async function f1Get(url, config = {}, priority = PRIORITY.NORMAL) {
   if (!isOpenF1Url(url)) {
     return axios.get(url, config);
   }
-  return scheduleOpenF1(async () => {
-    const token = await getOpenF1Token();
-    const headers = { ...(config.headers || {}) };
-    if (token) headers.Authorization = `Bearer ${token}`;
-    return axios.get(url, { ...config, headers });
-  }, priority);
+  const maxAttempts = 4;
+  let attempt = 0;
+  while (true) {
+    attempt++;
+    try {
+      return await scheduleOpenF1(async () => {
+        const token = await getOpenF1Token();
+        const headers = { ...(config.headers || {}) };
+        if (token) headers.Authorization = `Bearer ${token}`;
+        return axios.get(url, { ...config, headers });
+      }, priority);
+    } catch (err) {
+      if (isRateLimitError(err) && attempt < maxAttempts) {
+        // Pause the whole queue; the pump will wait out the cooldown before
+        // dispatching this retry (no separate sleep needed).
+        rateLimiter.applyCooldown();
+        console.warn(
+          `[rate-limit] 429 for ${url}; cooling down ${RATE_LIMIT_COOLDOWN_MS}ms (attempt ${attempt}/${maxAttempts})`,
+        );
+        continue;
+      }
+      throw err;
+    }
+  }
 }
 
 // --- OpenF1 MQTT live data ---
@@ -2189,6 +2248,22 @@ async function buildAndCacheSession(sessionKey, options = {}) {
   // User-facing / live session builds get HIGH priority so they jump ahead of
   // background warm-up refreshes in the rate limiter.
   const priority = options.priority ?? PRIORITY.HIGH;
+  // Deduplicate concurrent rebuilds: if a build for this session is already in
+  // flight, reuse it instead of queueing another full set of ~9 requests.
+  if (sessionBuildsInFlight.has(cacheKey)) {
+    return sessionBuildsInFlight.get(cacheKey);
+  }
+  const buildPromise = buildAndCacheSessionInner(sessionKey, options, priority);
+  sessionBuildsInFlight.set(cacheKey, buildPromise);
+  try {
+    return await buildPromise;
+  } finally {
+    sessionBuildsInFlight.delete(cacheKey);
+  }
+}
+
+async function buildAndCacheSessionInner(sessionKey, options, priority) {
+  const cacheKey = `session:${sessionKey}`;
   try {
     // fetch session object (prefer cached sessions list lookup first)
     let sessionObj = null;
@@ -3010,14 +3085,17 @@ async function buildAndCacheSession(sessionKey, options = {}) {
       const liveWindowEnd = hasValidDates ? endMs + 15 * 60 * 1000 : -Infinity;
       const isLiveWindow =
         hasValidDates && now >= liveWindowStart && now <= liveWindowEnd;
-      // Only use aggressive 10s refresh if either (a) caller forced live and a recent
+      // Only use aggressive refresh if either (a) caller forced live and a recent
       // active live request exists for this session, or (b) we're in the live time
       // window and there is a recent active live request. This avoids polling when
       // no clients are actively requesting live data.
       const hasActiveClient = activeLiveClients.has(String(sessionKey));
       const shouldUseFastRefresh =
         hasActiveClient && ((options && options.forceLive) || isLiveWindow);
-      const refreshMs = shouldUseFastRefresh ? 10000 : ttl;
+      // Live data now arrives via MQTT, so the REST rebuild is only needed to
+      // refresh the slower-moving resources. Keep it infrequent (30s) so it
+      // doesn't flood the rate-limiter queue and starve user requests.
+      const refreshMs = shouldUseFastRefresh ? 30000 : ttl;
 
       // if there's an existing interval, clear it so we can set the new cadence
       if (refreshIntervals.has(cacheKey)) {
@@ -3028,7 +3106,12 @@ async function buildAndCacheSession(sessionKey, options = {}) {
       }
 
       const id = setInterval(
-        () => buildAndCacheSession(sessionKey, options).catch(() => {}),
+        () =>
+          buildAndCacheSession(sessionKey, {
+            ...options,
+            // Background refresh must never outrank user-facing requests.
+            priority: PRIORITY.LOW,
+          }).catch(() => {}),
         refreshMs,
       );
       refreshIntervals.set(cacheKey, id);
@@ -3248,6 +3331,15 @@ f1.get("/session", async (req, res) => {
         setCachingHeaders(res, ttl);
         return res.json({ source: "cache", data: entry.data });
       }
+      // Stale but present: serve it immediately and refresh in the background
+      // so the user never waits behind the rate-limiter queue.
+      buildAndCacheSession(sessionKey, {
+        forceLive: false,
+        initTime: Date.now(),
+        priority: PRIORITY.LOW,
+      }).catch(() => {});
+      setCachingHeaders(res, ttl);
+      return res.json({ source: "cache", data: entry.data });
     }
 
     // if forcing live, mark session active so 10s polling will be enabled
@@ -3495,6 +3587,15 @@ f1.get("/session/:session_key/:status?", async (req, res) => {
         setCachingHeaders(res, ttl);
         return res.json({ source: "cache", data: entry.data });
       }
+      // Stale but present: serve it immediately and refresh in the background
+      // so the user never waits behind the rate-limiter queue.
+      buildAndCacheSession(sessionKey, {
+        forceLive: false,
+        initTime: Date.now(),
+        priority: PRIORITY.LOW,
+      }).catch(() => {});
+      setCachingHeaders(res, ttl);
+      return res.json({ source: "cache", data: entry.data });
     }
 
     const assembled = await buildAndCacheSession(sessionKey, {
