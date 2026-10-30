@@ -2,6 +2,7 @@ const express = require("express");
 const axios = require("axios");
 const cors = require("cors");
 const compression = require("compression");
+const mqtt = require("mqtt");
 try {
   require("dotenv").config();
 } catch (e) {}
@@ -82,19 +83,261 @@ async function getOpenF1Token() {
   return openF1TokenPromise;
 }
 
+// --- OpenF1 rate limiting + priority scheduling ---
+// OpenF1 allows 6 requests/second and 60 requests/minute. We funnel every
+// OpenF1 REST call through a single scheduler so we never exceed those limits,
+// and so higher-priority (user-facing / live) requests jump ahead of
+// lower-priority (background warm-up / refresh) ones.
+const RATE_LIMIT_PER_SEC = 6;
+const RATE_LIMIT_PER_MIN = 60;
+
+// Priority levels (lower number = higher priority).
+const PRIORITY = {
+  LIVE: 0, // live session data the user is actively watching
+  HIGH: 1, // user-facing on-demand requests
+  NORMAL: 2, // standard endpoint fetches
+  LOW: 3, // background warm-up / periodic refresh
+};
+
+const rateLimiter = {
+  // timestamps (ms) of recent OpenF1 requests
+  recent: [],
+  queue: [],
+  running: false,
+  seq: 0,
+
+  // Remove timestamps older than 60s (the widest window we track).
+  prune(now) {
+    const cutoff = now - 60 * 1000;
+    while (this.recent.length > 0 && this.recent[0] < cutoff) {
+      this.recent.shift();
+    }
+  },
+
+  // How long (ms) we must wait before another request is allowed.
+  waitTime(now) {
+    this.prune(now);
+    const lastSec = this.recent.filter((t) => t > now - 1000);
+    const lastMin = this.recent;
+    let wait = 0;
+    if (lastSec.length >= RATE_LIMIT_PER_SEC) {
+      // wait until the oldest request in the last second falls out of window
+      wait = Math.max(wait, lastSec[0] + 1000 - now);
+    }
+    if (lastMin.length >= RATE_LIMIT_PER_MIN) {
+      wait = Math.max(wait, lastMin[0] + 60 * 1000 - now);
+    }
+    return Math.max(0, wait);
+  },
+
+  enqueue(task) {
+    this.queue.push(task);
+    // Stable sort by priority, then FIFO by insertion sequence.
+    this.queue.sort((a, b) => a.priority - b.priority || a.seq - b.seq);
+    this.pump();
+  },
+
+  async pump() {
+    if (this.running) return;
+    this.running = true;
+    try {
+      while (this.queue.length > 0) {
+        const now = Date.now();
+        const wait = this.waitTime(now);
+        if (wait > 0) {
+          await new Promise((r) => setTimeout(r, wait));
+          continue;
+        }
+        const task = this.queue.shift();
+        this.recent.push(Date.now());
+        // Run the task; don't let one failure stall the queue.
+        Promise.resolve()
+          .then(() => task.run())
+          .then(task.resolve, task.reject);
+      }
+    } finally {
+      this.running = false;
+    }
+  },
+};
+
+// Schedule an OpenF1 request through the rate limiter.
+function scheduleOpenF1(run, priority = PRIORITY.NORMAL) {
+  return new Promise((resolve, reject) => {
+    rateLimiter.enqueue({
+      run,
+      resolve,
+      reject,
+      priority,
+      seq: rateLimiter.seq++,
+    });
+  });
+}
+
 // Authenticated axios.get wrapper for OpenF1 URLs.
-// Non-OpenF1 URLs (e.g. cf.nascar.com) are passed through unchanged.
-async function f1Get(url, config = {}) {
-  if (isOpenF1Url(url)) {
+// Non-OpenF1 URLs (e.g. cf.nascar.com) are passed through unchanged and are
+// NOT rate limited (the OpenF1 limits don't apply to them).
+async function f1Get(url, config = {}, priority = PRIORITY.NORMAL) {
+  if (!isOpenF1Url(url)) {
+    return axios.get(url, config);
+  }
+  return scheduleOpenF1(async () => {
     const token = await getOpenF1Token();
-    if (token) {
-      config.headers = {
-        ...(config.headers || {}),
-        Authorization: `Bearer ${token}`,
-      };
+    const headers = { ...(config.headers || {}) };
+    if (token) headers.Authorization = `Bearer ${token}`;
+    return axios.get(url, { ...config, headers });
+  }, priority);
+}
+
+// --- OpenF1 MQTT live data ---
+// OpenF1 pushes live data over MQTT (MQTT over WebSockets). We subscribe to the
+// topics we care about and keep the latest message per (topic, driver) in a
+// small in-memory store. Live endpoints read from here instead of polling the
+// REST API, which keeps us well under the 6 req/s and 60 req/min limits.
+const MQTT_URL = "wss://mqtt.openf1.org:8084/mqtt";
+// Topics we subscribe to. `v1/position` replaces the old REST `position`
+// polling for live sessions; `v1/intervals` replaces the removed `intervals`
+// REST fetches.
+const MQTT_TOPICS = [
+  "v1/position",
+  "v1/laps",
+  "v1/race_control",
+  "v1/pit",
+  "v1/stints",
+  "v1/session_result",
+  "v1/weather",
+  "v1/intervals",
+  "v1/location",
+];
+// topic -> Map(key -> latest message).
+// State topics keep only the newest message per (session, driver) so memory
+// stays bounded during a race. Event topics (race_control, pit) are append-only
+// and keyed by the message `_key` so every event is retained.
+const mqttStore = new Map();
+let mqttClient = null;
+let mqttConnected = false;
+let mqttReconnectTimer = null;
+
+// Topics whose messages represent the *latest state* of a driver/session.
+const MQTT_STATE_TOPICS = new Set([
+  "v1/position",
+  "v1/laps",
+  "v1/intervals",
+  "v1/location",
+  "v1/stints",
+  "v1/session_result",
+  "v1/weather",
+]);
+// Topics whose messages are discrete events that should all be retained.
+const MQTT_EVENT_TOPICS = new Set(["v1/race_control", "v1/pit"]);
+
+function mqttStoreKey(topic, msg) {
+  const sk = msg?.session_key ?? "";
+  const dn = msg?.driver_number ?? "";
+  if (MQTT_EVENT_TOPICS.has(topic)) {
+    // Retain every event; use _key when available, else a composite.
+    return (
+      msg?._key ?? `${sk}:${dn}:${msg?.date ?? ""}:${msg?.lap_number ?? ""}`
+    );
+  }
+  // State topics: newest message per session+driver wins.
+  return `${sk}:${dn}`;
+}
+
+function mqttTopicName(topic) {
+  // "v1/position" -> "position"
+  return topic.replace(/^v1\//, "");
+}
+
+function startMqtt() {
+  if (mqttClient) return;
+  const connect = async () => {
+    try {
+      const token = await getOpenF1Token();
+      if (!token) {
+        console.warn("[mqtt] No OpenF1 token available; retrying in 30s.");
+        mqttReconnectTimer = setTimeout(connect, 30000);
+        return;
+      }
+      console.log("[mqtt] Connecting to OpenF1 MQTT broker...");
+      mqttClient = mqtt.connect(MQTT_URL, {
+        username: OPENF1_USERNAME || "openf1",
+        password: token,
+        reconnectPeriod: 5000,
+        connectTimeout: 15000,
+        clean: true,
+      });
+
+      mqttClient.on("connect", () => {
+        mqttConnected = true;
+        console.log("[mqtt] Connected. Subscribing to topics.");
+        for (const topic of MQTT_TOPICS) {
+          mqttClient.subscribe(topic, (err) => {
+            if (err)
+              console.warn(
+                `[mqtt] Subscribe failed for ${topic}:`,
+                err.message,
+              );
+          });
+        }
+      });
+
+      mqttClient.on("message", (topic, payload) => {
+        try {
+          const msg = JSON.parse(payload.toString());
+          const name = mqttTopicName(topic);
+          if (!mqttStore.has(name)) mqttStore.set(name, new Map());
+          const store = mqttStore.get(name);
+          const key = mqttStoreKey(topic, msg);
+          if (MQTT_EVENT_TOPICS.has(topic)) {
+            // Events are append-only; keep every distinct message.
+            store.set(key, msg);
+            return;
+          }
+          // State topics: keep the newest message per key (by _id when present).
+          const existing = store.get(key);
+          const newId = msg?._id ?? null;
+          const oldId = existing?._id ?? null;
+          if (
+            !existing ||
+            (newId != null && oldId != null && newId >= oldId) ||
+            (newId == null && oldId == null)
+          ) {
+            store.set(key, msg);
+          }
+        } catch (e) {
+          // ignore malformed payloads
+        }
+      });
+
+      mqttClient.on("error", (err) => {
+        console.warn("[mqtt] Error:", err.message);
+      });
+      mqttClient.on("close", () => {
+        mqttConnected = false;
+      });
+      mqttClient.on("offline", () => {
+        mqttConnected = false;
+      });
+    } catch (e) {
+      console.warn("[mqtt] Connection setup failed:", e.message);
+      mqttReconnectTimer = setTimeout(connect, 30000);
+    }
+  };
+  connect();
+}
+
+// Return the latest MQTT messages for a topic, optionally filtered by session.
+function getMqttMessages(topicName, sessionKey) {
+  const store = mqttStore.get(topicName);
+  if (!store) return [];
+  const out = [];
+  for (const msg of store.values()) {
+    if (sessionKey == null || String(msg?.session_key) === String(sessionKey)) {
+      out.push(msg);
     }
   }
-  return axios.get(url, config);
+  return out;
 }
 
 // --- OpenF1 live-session restriction handling ---
@@ -134,7 +377,7 @@ function startOpenF1Recovery() {
   openF1RecoveryTimer = setInterval(async () => {
     try {
       const testUrl = `${BASE_URL}sessions?year=${new Date().getFullYear()}`;
-      await f1Get(testUrl, { timeout: 10000 });
+      await f1Get(testUrl, { timeout: 10000 }, PRIORITY.LOW);
       // success — API is back
       console.log(
         "[openf1-recovery] API available again. Refreshing all caches.",
@@ -655,9 +898,9 @@ function buildPositionIntervals({
   return positionsMap;
 }
 
-async function fetchAndCache(key, url) {
+async function fetchAndCache(key, url, priority = PRIORITY.NORMAL) {
   try {
-    const r = await f1Get(url, { timeout: 10000 });
+    const r = await f1Get(url, { timeout: 10000 }, priority);
     // If we previously were restricted, clear the flag now
     if (openF1Restricted) {
       console.log("[fetchAndCache] OpenF1 API appears available again.");
@@ -699,12 +942,16 @@ async function fetchAndCache(key, url) {
 
 // fetch until upstream returns a non-empty session_result payload or until a timeout
 async function fetchAndCacheWithRetry(key, url, opts = {}) {
-  const { maxWaitMs = 30000, intervalMs = 2000 } = opts;
+  const {
+    maxWaitMs = 30000,
+    intervalMs = 2000,
+    priority = PRIORITY.NORMAL,
+  } = opts;
   const start = Date.now();
 
   while (true) {
     try {
-      const r = await f1Get(url, { timeout: 10000 });
+      const r = await f1Get(url, { timeout: 10000 }, priority);
       const payload = r.data;
 
       // Consider payload non-empty if it's an array with length > 0,
@@ -752,18 +999,18 @@ async function fetchAndCacheWithRetry(key, url, opts = {}) {
   }
 }
 
-async function getCached(key, url) {
+async function getCached(key, url, priority = PRIORITY.NORMAL) {
   const effectiveTtl = capTTLForRestriction(TTL_MS);
   const entry = cache.get(key);
   if (entry) {
     const age = Date.now() - entry.fetchedAt;
     if (age < effectiveTtl) return { data: entry.data, fromCache: true };
   }
-  return await fetchAndCache(key, url);
+  return await fetchAndCache(key, url, priority);
 }
 
 // variant that accepts custom TTL
-async function getCachedWithTTL(key, url, ttlMs) {
+async function getCachedWithTTL(key, url, ttlMs, priority = PRIORITY.NORMAL) {
   const effectiveTtl = capTTLForRestriction(ttlMs);
   const entry = cache.get(key);
   if (entry) {
@@ -787,7 +1034,7 @@ async function getCachedWithTTL(key, url, ttlMs) {
       lowerKey.includes("session_key") || lowerUrl.includes("session_key=");
     if (isSessionScoped) {
       try {
-        return await fetchAndCache(key, url);
+        return await fetchAndCache(key, url, priority);
       } catch (e) {
         return { data: null, fromCache: false };
       }
@@ -798,6 +1045,7 @@ async function getCachedWithTTL(key, url, ttlMs) {
       const res = await fetchAndCacheWithRetry(key, url, {
         maxWaitMs: 30000,
         intervalMs: 2000,
+        priority,
       });
       return res;
     } catch (e) {
@@ -805,7 +1053,7 @@ async function getCachedWithTTL(key, url, ttlMs) {
       console.warn(
         `[getCachedWithTTL] retry fetch failed for ${key}: ${e.message}`,
       );
-      const res = await fetchAndCache(key, url).catch((err) => ({
+      const res = await fetchAndCache(key, url, priority).catch((err) => ({
         data: null,
         fromCache: false,
       }));
@@ -813,7 +1061,7 @@ async function getCachedWithTTL(key, url, ttlMs) {
     }
   }
 
-  const res = await fetchAndCache(key, url);
+  const res = await fetchAndCache(key, url, priority);
   return res;
 }
 
@@ -824,16 +1072,18 @@ function waitForTimeout(ms) {
 async function warmRacingDateCaches() {
   const currentYear = new Date().getFullYear();
   // Fetch meetings and sessions first (with year filter), then drivers using meeting keys
-  await getCachedWithTTL(
-    "meetings",
-    `${BASE_URL}meetings?year=${currentYear}`,
-    TTL_6H,
-  ).catch(() => {});
-  await getCachedWithTTL(
-    "sessions",
-    `${BASE_URL}sessions?year=${currentYear}`,
-    TTL_6H,
-  ).catch(() => {});
+  await Promise.all([
+    getCachedWithTTL(
+      "meetings",
+      `${BASE_URL}meetings?year=${currentYear}`,
+      TTL_6H,
+    ).catch(() => {}),
+    getCachedWithTTL(
+      "sessions",
+      `${BASE_URL}sessions?year=${currentYear}`,
+      TTL_6H,
+    ).catch(() => {}),
+  ]);
 
   const warmupTasks = [
     refreshSessionResultCacheIfLive(),
@@ -975,7 +1225,7 @@ function buildNascarDriversMap(driversArr) {
 function ensureRefreshInterval(key, url, ttlMs) {
   if (!refreshIntervals.has(key)) {
     const id = setInterval(
-      () => fetchAndCache(key, url).catch(() => {}),
+      () => fetchAndCache(key, url, PRIORITY.LOW).catch(() => {}),
       ttlMs,
     );
     refreshIntervals.set(key, id);
@@ -1013,7 +1263,7 @@ function watchSessionResultUntilChanged(sessionKey, prevSnapshot, opts = {}) {
 
     const id = setInterval(async () => {
       try {
-        const r = await f1Get(url, { timeout: 10000 });
+        const r = await f1Get(url, { timeout: 10000 }, PRIORITY.LOW);
         const payload = r.data || null;
 
         // Normalize to comparable form: JSON stringify of array or object
@@ -1085,7 +1335,7 @@ function updateRefreshInterval(key, url, ttlMs) {
       refreshIntervals.delete(key);
     }
     const id = setInterval(
-      () => fetchAndCache(key, url).catch(() => {}),
+      () => fetchAndCache(key, url, PRIORITY.LOW).catch(() => {}),
       ttlMs,
     );
     refreshIntervals.set(key, id);
@@ -1929,13 +2179,16 @@ function computeSessionTTLFromDates(dateStartStr, dateEndStr) {
   if (now < beforeStart15)
     baseTtl = 30 * 60 * 1000; // 30 minutes
   else if (now >= beforeStart15 && now <= afterEnd15)
-    baseTtl = 5 * 1000; // live window: 5 seconds
+    baseTtl = 10 * 1000; // live window: 10 seconds
   else baseTtl = 24 * 60 * 60 * 1000; // finished: 24 hours
   return capTTLForRestriction(baseTtl);
 }
 
 async function buildAndCacheSession(sessionKey, options = {}) {
   const cacheKey = `session:${sessionKey}`;
+  // User-facing / live session builds get HIGH priority so they jump ahead of
+  // background warm-up refreshes in the rate limiter.
+  const priority = options.priority ?? PRIORITY.HIGH;
   try {
     // fetch session object (prefer cached sessions list lookup first)
     let sessionObj = null;
@@ -2079,6 +2332,9 @@ async function buildAndCacheSession(sessionKey, options = {}) {
     );
 
     // fetch other resources using session_key
+    // These are independent, so fetch them in parallel. The rate limiter
+    // dispatches up to 6 at a time (per second), so a ~10-resource session
+    // build completes in ~2 batches instead of 10 sequential round-trips.
     const resourceNames = [
       "overtakes",
       "pit",
@@ -2089,50 +2345,46 @@ async function buildAndCacheSession(sessionKey, options = {}) {
       "laps",
     ];
     const resources = {};
-    for (const name of resourceNames) {
-      try {
-        let path;
-        if (name === "position") {
-          path = `position?session_key=${encodeURIComponent(sessionKey)}`;
-        } else if (name === "laps") {
-          // keep laps session-scoped for efficiency
-          path = `${name}?session_key=${encodeURIComponent(sessionKey)}`;
-        } else {
-          path = `${name}?session_key=${encodeURIComponent(sessionKey)}`;
-        }
-        // By default use session TTL, but override session_result to be aggressively
-        // refreshed (5s) while we're within 1 hour after session end so callers
-        // will see updated data as it becomes available.
-        let resourceTtl = ttl;
-        if (name === "session_result") {
-          try {
-            const endMs = new Date(
-              sessionObj.date_end || sessionObj.dateEnd,
-            ).getTime();
-            const now = Date.now();
-            const endPlus1h = endMs + 60 * 60 * 1000; // 1 hour after end
-            if (now <= endPlus1h) {
-              // make session_result refresh frequently (10s)
-              resourceTtl = 10 * 1000;
+    await Promise.all(
+      resourceNames.map(async (name) => {
+        try {
+          const path = `${name}?session_key=${encodeURIComponent(sessionKey)}`;
+          // By default use session TTL, but override session_result to be
+          // aggressively refreshed (10s) while we're within 1 hour after
+          // session end so callers see updated data as it becomes available.
+          let resourceTtl = ttl;
+          if (name === "session_result") {
+            try {
+              const endMs = new Date(
+                sessionObj.date_end || sessionObj.dateEnd,
+              ).getTime();
+              const now = Date.now();
+              const endPlus1h = endMs + 60 * 60 * 1000; // 1 hour after end
+              if (now <= endPlus1h) {
+                // make session_result refresh frequently (10s)
+                resourceTtl = 10 * 1000;
+              }
+            } catch (e) {
+              // fallback: leave resourceTtl as ttl
             }
-          } catch (e) {
-            // fallback: leave resourceTtl as ttl
           }
-        }
 
-        const { data } = await getCachedWithTTL(
-          path,
-          `${BASE_URL}${path}`,
-          resourceTtl,
-        ).catch(() => ({ data: null }));
-        resources[name] = normalizeArray(data);
-      } catch (e) {
-        resources[name] = [];
-      }
-    }
+          const { data } = await getCachedWithTTL(
+            path,
+            `${BASE_URL}${path}`,
+            resourceTtl,
+            priority,
+          ).catch(() => ({ data: null }));
+          resources[name] = normalizeArray(data);
+        } catch (e) {
+          resources[name] = [];
+        }
+      }),
+    );
 
     // weather: construct an `atStart` object (closest to session start)
-    // and a `now` object with the latest available weather record for this session
+    // and a `now` object with the latest available weather record for this session.
+    // Both fetches are independent, so run them in parallel.
     let weatherAtStart = null;
     let weatherNow = null;
     try {
@@ -2141,13 +2393,22 @@ async function buildAndCacheSession(sessionKey, options = {}) {
       ).getTime();
       const startMinus = new Date(startMs - 2 * 60 * 1000).toISOString();
       const startPlus = new Date(startMs + 2 * 60 * 1000).toISOString();
-      const path = `weather?session_key=${encodeURIComponent(sessionKey)}&date%3E=${encodeURIComponent(startMinus)}&date%3C=${encodeURIComponent(startPlus)}`;
-      const { data } = await getCachedWithTTL(
-        path,
-        `${BASE_URL}${path}`,
-        ttl,
-      ).catch(() => ({ data: null }));
-      const arr = normalizeArray(data);
+      const pathAtStart = `weather?session_key=${encodeURIComponent(sessionKey)}&date%3E=${encodeURIComponent(startMinus)}&date%3C=${encodeURIComponent(startPlus)}`;
+      const pathNow = `weather?session_key=${encodeURIComponent(sessionKey)}`;
+
+      const [atStartRes, nowRes] = await Promise.all([
+        getCachedWithTTL(
+          pathAtStart,
+          `${BASE_URL}${pathAtStart}`,
+          ttl,
+          priority,
+        ).catch(() => ({ data: null })),
+        getCachedWithTTL(pathNow, `${BASE_URL}${pathNow}`, ttl, priority).catch(
+          () => ({ data: null }),
+        ),
+      ]);
+
+      const arr = normalizeArray(atStartRes.data);
       if (arr.length > 0) {
         let closest = arr[0];
         let bestDiff = Math.abs(new Date(closest.date).getTime() - startMs);
@@ -2160,19 +2421,8 @@ async function buildAndCacheSession(sessionKey, options = {}) {
         }
         weatherAtStart = closest;
       }
-    } catch (e) {
-      weatherAtStart = null;
-    }
 
-    // latest weather for session (most recent record)
-    try {
-      const pathNow = `weather?session_key=${encodeURIComponent(sessionKey)}`;
-      const { data: nowData } = await getCachedWithTTL(
-        pathNow,
-        `${BASE_URL}${pathNow}`,
-        ttl,
-      ).catch(() => ({ data: null }));
-      const arrAll = normalizeArray(nowData);
+      const arrAll = normalizeArray(nowRes.data);
       if (arrAll.length > 0) {
         // find most recent by date
         arrAll.sort((a, b) => {
@@ -2183,13 +2433,19 @@ async function buildAndCacheSession(sessionKey, options = {}) {
         weatherNow = arrAll[0];
       }
     } catch (e) {
+      weatherAtStart = null;
       weatherNow = null;
     }
 
     // prepare drivers set for referenced drivers (will be populated from other resources and live fetches)
     const driversSet = new Set();
 
-    // live intervals and location: fetch 10s window when session is live (session start..end+15m) or when forced
+    // --- live data via MQTT ---
+    // Instead of polling the REST API for live windows (which burns through the
+    // 6 req/s and 60 req/min limits), we read the latest pushed messages from
+    // the MQTT store. `intervals` and `location` are MQTT-only now; `position`
+    // is merged from MQTT on top of the REST history so the position map stays
+    // complete for finished sessions while staying fresh for live ones.
     let intervalsMap = Object.create(null);
     let locationMap = Object.create(null);
     let positionMap = Object.create(null);
@@ -2201,175 +2457,93 @@ async function buildAndCacheSession(sessionKey, options = {}) {
       const endMs = new Date(
         sessionObj.date_end || sessionObj.dateEnd,
       ).getTime();
-
-      // live for TTL is based on 15m before start to 15m after end, but intervals should start at session start
-      const isLiveWindow = now >= startMs && now <= endMs + 15 * 60 * 1000;
+      const isLiveWindow =
+        Number.isFinite(startMs) &&
+        Number.isFinite(endMs) &&
+        now >= startMs - 15 * 60 * 1000 &&
+        now <= endMs + 15 * 60 * 1000;
       const forced = !!options.forceLive;
-      let shouldFetchLive = false;
-      if (forced) shouldFetchLive = true;
-      else if (isLiveWindow) shouldFetchLive = true;
+      const shouldUseLive = forced || isLiveWindow;
 
-      if (shouldFetchLive) {
-        let windowStartMs;
-        if (forced) {
-          if (now > endMs)
-            windowStartMs = endMs - 10000; // 10s before end when forced after end
-          else if (now < startMs)
-            windowStartMs = startMs; // before start forced -> use start
-          else windowStartMs = options.initTime || now;
-        } else {
-          // not forced: only fetch if session has started
-          if (now < startMs) windowStartMs = null;
-          else windowStartMs = options.initTime || now;
+      if (shouldUseLive && mqttConnected) {
+        // intervals (MQTT only)
+        for (const it of getMqttMessages("intervals", sessionKey)) {
+          const dn = String(it.driver_number || it.driverNumber || "");
+          if (!dn) continue;
+          const copy = { ...it };
+          delete copy.meeting_key;
+          delete copy.session_key;
+          intervalsMap[dn] = copy;
+          driversSet.add(dn);
         }
 
-        if (windowStartMs) {
-          const a = new Date(windowStartMs).toISOString();
-          const b = new Date(windowStartMs + 10000).toISOString();
-          // intervals
-          try {
-            const path = `intervals?session_key=${encodeURIComponent(sessionKey)}&date%3E=${encodeURIComponent(a)}&date%3C=${encodeURIComponent(b)}`;
-            const { data } = await getCachedWithTTL(
-              path,
-              `${BASE_URL}${path}`,
-              10000,
-            ).catch(() => ({ data: null }));
-            const arr = normalizeArray(data);
-            for (const it of arr) {
-              const dn = String(it.driver_number || it.driverNumber || "");
-              if (!dn) continue;
-              const copy = { ...it };
-              if (copy.meeting_key) delete copy.meeting_key;
-              if (copy.session_key) delete copy.session_key;
-              if (!intervalsMap[dn]) intervalsMap[dn] = [];
-              intervalsMap[dn].push(copy);
-              driversSet.add(dn);
-            }
-          } catch (e) {}
+        // location (MQTT only)
+        for (const it of getMqttMessages("location", sessionKey)) {
+          const dn = String(it.driver_number || it.driverNumber || "");
+          if (!dn) continue;
+          const copy = { ...it };
+          delete copy.meeting_key;
+          delete copy.session_key;
+          locationMap[dn] = copy;
+          driversSet.add(dn);
+        }
 
-          // location
-          try {
-            const path = `location?session_key=${encodeURIComponent(sessionKey)}&date%3E=${encodeURIComponent(a)}&date%3C=${encodeURIComponent(b)}`;
-            const { data } = await getCachedWithTTL(
-              path,
-              `${BASE_URL}${path}`,
-              10000,
-            ).catch(() => ({ data: null }));
-            const arr = normalizeArray(data);
-            for (const it of arr) {
-              const dn = String(it.driver_number || it.driverNumber || "");
-              if (!dn) continue;
-              const copy = { ...it };
-              if (copy.meeting_key) delete copy.meeting_key;
-              if (copy.session_key) delete copy.session_key;
-              if (!locationMap[dn]) locationMap[dn] = [];
-              locationMap[dn].push(copy);
-              driversSet.add(dn);
-            }
-          } catch (e) {}
+        // position (MQTT) — merge into the REST history so the assembled
+        // position map reflects the very latest live positions.
+        const mqttPositions = getMqttMessages("position", sessionKey);
+        if (mqttPositions.length > 0) {
+          const merged = Array.isArray(resources.position)
+            ? resources.position.slice()
+            : [];
+          for (const it of mqttPositions) {
+            const dn = String(it.driver_number || it.driverNumber || "");
+            if (!dn) continue;
+            const copy = { ...it };
+            delete copy.meeting_key;
+            merged.push(copy);
+            positionMap[dn] = copy;
+            driversSet.add(dn);
+          }
+          resources.position = merged;
+        }
 
-          // position (like intervals/location)
-          try {
-            const path = `position?session_key=${encodeURIComponent(sessionKey)}&date%3E=${encodeURIComponent(a)}&date%3C=${encodeURIComponent(b)}`;
-            const { data } = await getCachedWithTTL(
-              path,
-              `${BASE_URL}${path}`,
-              10000,
-            ).catch(() => ({ data: null }));
-            const arrPos = normalizeArray(data);
-            for (const it of arrPos) {
-              const dn = String(it.driver_number || it.driverNumber || "");
-              if (!dn) continue;
-              const copy = { ...it };
-              if (copy.meeting_key) delete copy.meeting_key;
-              if (!positionMap[dn]) positionMap[dn] = [];
-              positionMap[dn].push(copy);
-              driversSet.add(dn);
-            }
-          } catch (e) {}
-
-          // live versions of other resources (overtakes, pit, race_control, stints, session_result)
-          try {
-            const liveResources = [
-              "overtakes",
-              "pit",
-              "race_control",
-              "stints",
-              "session_result",
-              "position",
-            ];
-            for (const name of liveResources) {
-              try {
-                const path = `${name}?session_key=${encodeURIComponent(sessionKey)}&date%3E=${encodeURIComponent(a)}&date%3C=${encodeURIComponent(b)}`;
-                const { data } = await getCachedWithTTL(
-                  path,
-                  `${BASE_URL}${path}`,
-                  10000,
-                ).catch(() => ({ data: null }));
-                const liveArr = normalizeArray(data);
-                if (Array.isArray(liveArr) && liveArr.length > 0) {
-                  // replace the previously fetched full-ttl resource with the live window
-                  resources[name] = liveArr;
-                  for (const it of liveArr) {
-                    if (!it) continue;
-                    if (it.meeting_key) delete it.meeting_key;
-                    if (it.session_key) delete it.session_key;
-                    const dn = String(
-                      it.driver_number || it.driverNumber || "",
-                    );
-                    if (dn) driversSet.add(dn);
-                  }
-                }
-              } catch (e) {
-                // ignore per-resource live fetch errors
-              }
-            }
-          } catch (e) {}
+        // Other live resources: prefer the freshest MQTT message per driver
+        // over the REST snapshot when we have one.
+        const mqttLiveResources = [
+          ["laps", "laps"],
+          ["race_control", "race_control"],
+          ["pit", "pit"],
+          ["stints", "stints"],
+          ["session_result", "session_result"],
+        ];
+        for (const [resourceName, topicName] of mqttLiveResources) {
+          const msgs = getMqttMessages(topicName, sessionKey);
+          if (msgs.length === 0) continue;
+          const existing = Array.isArray(resources[resourceName])
+            ? resources[resourceName]
+            : [];
+          // Merge by a stable key so we don't duplicate entries.
+          const byKey = new Map();
+          const keyOf = (it) => {
+            const dn = it?.driver_number ?? it?.driverNumber ?? "";
+            const lap = it?.lap_number ?? it?.lapNumber ?? "";
+            const date = it?.date ?? "";
+            return `${dn}:${lap}:${date}`;
+          };
+          for (const it of existing) byKey.set(keyOf(it), it);
+          for (const it of msgs) {
+            const copy = { ...it };
+            delete copy.meeting_key;
+            delete copy.session_key;
+            byKey.set(keyOf(copy), copy);
+            const dn = String(copy.driver_number || copy.driverNumber || "");
+            if (dn) driversSet.add(dn);
+          }
+          resources[resourceName] = Array.from(byKey.values());
         }
       }
     } catch (e) {
-      // ignore live fetch errors
-    }
-    // reduce intervals/location to last sample per driver (if present)
-    try {
-      for (const dn of Object.keys(intervalsMap)) {
-        const arr = intervalsMap[dn];
-        if (Array.isArray(arr) && arr.length > 0) {
-          let last = arr[0];
-          for (const it of arr) {
-            if (!it || !it.date) continue;
-            if (new Date(it.date).getTime() >= new Date(last.date).getTime())
-              last = it;
-          }
-          intervalsMap[dn] = last;
-        }
-      }
-      for (const dn of Object.keys(locationMap)) {
-        const arr = locationMap[dn];
-        if (Array.isArray(arr) && arr.length > 0) {
-          let last = arr[0];
-          for (const it of arr) {
-            if (!it || !it.date) continue;
-            if (new Date(it.date).getTime() >= new Date(last.date).getTime())
-              last = it;
-          }
-          locationMap[dn] = last;
-        }
-      }
-      for (const dn of Object.keys(positionMap)) {
-        const arr = positionMap[dn];
-        if (Array.isArray(arr) && arr.length > 0) {
-          let last = arr[0];
-          for (const it of arr) {
-            if (!it || !it.date) continue;
-            if (new Date(it.date).getTime() >= new Date(last.date).getTime())
-              last = it;
-          }
-          positionMap[dn] = last;
-        }
-      }
-    } catch (e) {
-      // ignore reducing errors
+      // ignore live merge errors
     }
 
     // --- build positions map from 'position' resource scoped to this session ---
@@ -3078,10 +3252,10 @@ f1.get("/session", async (req, res) => {
 
     // if forcing live, mark session active so 10s polling will be enabled
     if (forceLive) markSessionActive(sessionKey);
-    if (forceLive) markSessionActive(sessionKey);
     const assembled = await buildAndCacheSession(sessionKey, {
       forceLive,
       initTime: Date.now(),
+      priority: forceLive ? PRIORITY.LIVE : PRIORITY.HIGH,
     });
     setCachingHeaders(res, ttl);
     res.json({ source: "origin", data: assembled });
@@ -3326,6 +3500,7 @@ f1.get("/session/:session_key/:status?", async (req, res) => {
     const assembled = await buildAndCacheSession(sessionKey, {
       forceLive,
       initTime: Date.now(),
+      priority: forceLive ? PRIORITY.LIVE : PRIORITY.HIGH,
     });
     setCachingHeaders(res, ttl);
     res.json({ source: "origin", data: assembled });
@@ -4472,7 +4647,7 @@ async function warmUpAll() {
   let restrictionDetected = false;
   const warmupEntry = async (key, url, ttl) => {
     try {
-      await fetchAndCache(key, url);
+      await fetchAndCache(key, url, PRIORITY.LOW);
     } catch (e) {
       if (isOpenF1RestrictionError(e)) restrictionDetected = true;
       console.warn(`Warm-up fetch failed for ${key}:`, e?.message || e);
@@ -4482,58 +4657,55 @@ async function warmUpAll() {
 
   const currentYear = new Date().getFullYear();
 
-  // fetch meetings and sessions first (with year filter)
-  await warmupEntry(
-    "meetings",
-    `${BASE_URL}meetings?year=${currentYear}`,
-    TTL_6H,
-  );
-  await warmupEntry(
-    "sessions",
-    `${BASE_URL}sessions?year=${currentYear}`,
-    TTL_6H,
-  );
+  // meetings and sessions must be cached first (other endpoints derive their
+  // meeting_key list from the cached meetings).
+  await Promise.all([
+    warmupEntry("meetings", `${BASE_URL}meetings?year=${currentYear}`, TTL_6H),
+    warmupEntry("sessions", `${BASE_URL}sessions?year=${currentYear}`, TTL_6H),
+  ]);
 
-  // fetch drivers using meeting keys from cached meetings
+  // These all depend on the cached meetings, but are independent of each other,
+  // so fetch them in parallel (the rate limiter batches them 6 at a time).
   const driversUrl = getUrlWithMeetingKeys("drivers");
-  await warmupEntry("drivers", driversUrl, TTL_MS);
-  await warmupEntry(
-    "championship_drivers",
-    getUrlWithMeetingKeys("championship_drivers"),
-    TTL_1H,
-  );
-  await warmupEntry(
-    "championship_teams",
-    getUrlWithMeetingKeys("championship_teams"),
-    TTL_1H,
-  );
-  await warmupEntry(
-    "session_result",
-    getUrlWithMeetingKeys("session_result"),
-    TTL_1H,
-  );
-  await warmupEntry(
-    "starting_grid",
-    getUrlWithMeetingKeys("starting_grid"),
-    TTL_1H,
-  );
-
-  // fetch NASCAR data on startup
-  await warmupEntry(
-    "nascar_races",
-    `https://cf.nascar.com/cacher/${currentYear}/race_list_basic.json`,
-    TTL_6H,
-  );
-  await warmupEntry(
-    "nascar_drivers",
-    "https://cf.nascar.com/cacher/drivers.json",
-    TTL_6H,
-  );
-  await warmupEntry(
-    "nascar_tracks",
-    "https://cf.nascar.com/cacher/tracks.json",
-    TTL_6H,
-  );
+  await Promise.all([
+    warmupEntry("drivers", driversUrl, TTL_MS),
+    warmupEntry(
+      "championship_drivers",
+      getUrlWithMeetingKeys("championship_drivers"),
+      TTL_1H,
+    ),
+    warmupEntry(
+      "championship_teams",
+      getUrlWithMeetingKeys("championship_teams"),
+      TTL_1H,
+    ),
+    warmupEntry(
+      "session_result",
+      getUrlWithMeetingKeys("session_result"),
+      TTL_1H,
+    ),
+    warmupEntry(
+      "starting_grid",
+      getUrlWithMeetingKeys("starting_grid"),
+      TTL_1H,
+    ),
+    // NASCAR data is independent of OpenF1 and not rate limited.
+    warmupEntry(
+      "nascar_races",
+      `https://cf.nascar.com/cacher/${currentYear}/race_list_basic.json`,
+      TTL_6H,
+    ),
+    warmupEntry(
+      "nascar_drivers",
+      "https://cf.nascar.com/cacher/drivers.json",
+      TTL_6H,
+    ),
+    warmupEntry(
+      "nascar_tracks",
+      "https://cf.nascar.com/cacher/tracks.json",
+      TTL_6H,
+    ),
+  ]);
 
   if (restrictionDetected) {
     console.log(
@@ -4544,6 +4716,13 @@ async function warmUpAll() {
 
 app.listen(PORT, async () => {
   console.log(`f1-server listening on ${PORT}`);
+  // Start the MQTT live-data connection first so live sessions stream in
+  // without consuming REST rate-limit budget.
+  try {
+    startMqtt();
+  } catch (e) {
+    console.warn("[mqtt] Failed to start:", e.message);
+  }
   // warm caches used across the app
   await warmUpAll();
   console.log("Warm-up complete");
