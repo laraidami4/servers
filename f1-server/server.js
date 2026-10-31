@@ -91,14 +91,16 @@ async function getOpenF1Token() {
 // and so higher-priority (user-facing / live) requests jump ahead of
 // lower-priority (background warm-up / refresh) ones.
 //
-// We deliberately stay UNDER the published limits (4/s, 40/min) because
-// OpenF1's limiter is strict, counts the token POST, and rejects bursts even
-// when the per-second count is legal. We also space dispatches out with a
-// minimum gap instead of firing a burst.
-const RATE_LIMIT_PER_SEC = 4;
-const RATE_LIMIT_PER_MIN = 40;
-// 4 req/s => 250ms between requests; we use 400ms for a comfortable margin.
-const MIN_DISPATCH_GAP_MS = 400;
+// We use the full published budget (6/s, 60/min), but we still space dispatches
+// out with a minimum gap instead of firing a burst: OpenF1 rejects same-instant
+// bursts even when the per-second count is legal, so the gap is what actually
+// keeps us under the limit.
+const RATE_LIMIT_PER_SEC = 6;
+const RATE_LIMIT_PER_MIN = 60;
+// 170ms gap => ~5.9/s, just under the 6/s cap, so the per-second window check
+// rarely needs to throttle. This is the fastest pacing that reliably avoids
+// 429s (verified against the live API).
+const MIN_DISPATCH_GAP_MS = 170;
 // When OpenF1 returns 429 we pause the whole queue for this long before retrying.
 const RATE_LIMIT_COOLDOWN_MS = 10 * 1000;
 
