@@ -2043,8 +2043,8 @@ f1.get("/driver/:driver_number", async (req, res) => {
           driversArr.find((d) => String(d.driver_number) === driverNumber) ||
           null;
 
-        const championship = champArr.filter(
-          (it) => String(it.driver_number) === driverNumber,
+        const championship = sortChampionshipRowsChronologically(
+          champArr.filter((it) => String(it.driver_number) === driverNumber),
         );
         const starting_grid = gridArr.filter(
           (it) => String(it.driver_number) === driverNumber,
@@ -2157,8 +2157,8 @@ f1.get("/team/:team_name", async (req, res) => {
         for (const d of teamDrivers) {
           const dn = String(d.driver_number);
           const driverInfo = d;
-          const championship = champArr.filter(
-            (it) => String(it.driver_number) === dn,
+          const championship = sortChampionshipRowsChronologically(
+            champArr.filter((it) => String(it.driver_number) === dn),
           );
           const starting_grid = gridArr.filter(
             (it) => String(it.driver_number) === dn,
@@ -3701,9 +3701,55 @@ function buildMeetingQuery(originalQuery) {
   return { q, keys };
 }
 
+// OpenF1 meeting_keys are NOT assigned in chronological order (e.g. in 2026
+// meeting_key 1308 = Malaysia Oct 2 sits between 1295 and 1296 = Singapore
+// Oct 9). Numeric order therefore puts newer races in the wrong spot. Build a
+// chronological index from the cached meetings' date_start so championship
+// rows can be ordered by actual race date instead of key number.
+function getMeetingChronologicalIndex() {
+  const meetingsEntry = cache.get("meetings");
+  const meetingsArr = normalizeArray(meetingsEntry?.data);
+  const list = meetingsArr
+    .filter((m) => m?.meeting_key != null)
+    .map((m) => ({
+      key: String(m.meeting_key),
+      start: m.date_start || m.dateStart || "",
+    }))
+    .sort((a, b) => {
+      if (a.start && b.start && a.start !== b.start)
+        return a.start < b.start ? -1 : 1;
+      // fall back to numeric key order when dates are missing/equal
+      return Number(a.key) - Number(b.key);
+    });
+  const index = new Map();
+  list.forEach((m, i) => index.set(m.key, i));
+  return index;
+}
+
+// Sort championship rows into true chronological order (meeting date first,
+// then session_key). Rows with unknown meeting_keys sort last.
+function sortChampionshipRowsChronologically(arr) {
+  const idx = getMeetingChronologicalIndex();
+  const unknownRank = idx.size;
+  return [...arr].sort((a, b) => {
+    const amk = String(a?.meeting_key ?? a?.meetingKey ?? "");
+    const bmk = String(b?.meeting_key ?? b?.meetingKey ?? "");
+    const ai = idx.has(amk) ? idx.get(amk) : unknownRank;
+    const bi = idx.has(bmk) ? idx.get(bmk) : unknownRank;
+    if (ai !== bi) return ai - bi;
+    const ask = Number(a?.session_key ?? a?.sessionKey ?? 0) || 0;
+    const bsk = Number(b?.session_key ?? b?.sessionKey ?? 0) || 0;
+    return ask - bsk;
+  });
+}
+
 // Group championship drivers by driver_number
 function groupChampionshipDrivers(arr) {
   const map = Object.create(null);
+  // arr must be chronologically sorted; the last row processed per driver is
+  // therefore the true latest, exposed explicitly as `latest` so consumers
+  // don't rely on object key iteration order (integer-like keys always
+  // iterate in ascending numeric order, which wrongly puts 1308 after 1298).
   for (const it of arr) {
     const dn = String(it?.driver_number ?? it?.driverNumber ?? "");
     const mk = String(it?.meeting_key ?? it?.meetingKey ?? "");
@@ -3713,11 +3759,17 @@ function groupChampionshipDrivers(arr) {
       map[dn] = { driver_number: dn, meetings: Object.create(null) };
     const meetings = map[dn].meetings;
     if (!meetings[mk]) meetings[mk] = Object.create(null);
-    meetings[mk][sk] = {
+    const entry = {
       position_start: it.position_start ?? it.positionStart ?? null,
       position_current: it.position_current ?? it.positionCurrent ?? null,
       points_start: it.points_start ?? it.pointsStart ?? null,
       points_current: it.points_current ?? it.pointsCurrent ?? null,
+    };
+    meetings[mk][sk] = entry;
+    map[dn].latest = {
+      meeting_key: mk,
+      session_key: sk,
+      ...entry,
     };
   }
   return Object.values(map);
@@ -3726,6 +3778,8 @@ function groupChampionshipDrivers(arr) {
 // Group championship teams by team_name
 function groupChampionshipTeams(arr) {
   const map = Object.create(null);
+  // arr must be chronologically sorted; the last row processed per team is
+  // therefore the true latest, exposed explicitly as `latest`.
   for (const it of arr) {
     const tn = String(it?.team_name ?? it?.teamName ?? "");
     const mk = String(it?.meeting_key ?? it?.meetingKey ?? "");
@@ -3734,11 +3788,17 @@ function groupChampionshipTeams(arr) {
     if (!map[tn]) map[tn] = { team_name: tn, meetings: Object.create(null) };
     const meetings = map[tn].meetings;
     if (!meetings[mk]) meetings[mk] = Object.create(null);
-    meetings[mk][sk] = {
+    const entry = {
       position_start: it.position_start ?? it.positionStart ?? null,
       position_current: it.position_current ?? it.positionCurrent ?? null,
       points_start: it.points_start ?? it.pointsStart ?? null,
       points_current: it.points_current ?? it.pointsCurrent ?? null,
+    };
+    meetings[mk][sk] = entry;
+    map[tn].latest = {
+      meeting_key: mk,
+      session_key: sk,
+      ...entry,
     };
   }
   return Object.values(map);
@@ -3767,6 +3827,8 @@ f1.get("/championship_drivers", async (req, res) => {
 
     const { data, fromCache } = await getCachedWithTTL(key, url, TTL_1H);
     let arr = normalizeArray(data);
+    // OpenF1 returns rows in meeting_key order, which is not chronological.
+    arr = sortChampionshipRowsChronologically(arr);
     const grouped = groupChampionshipDrivers(arr);
 
     ensureRefreshInterval(key, url, TTL_1H);
@@ -3836,6 +3898,8 @@ f1.get("/championship_teams", async (req, res) => {
 
     const { data, fromCache } = await getCachedWithTTL(key, url, TTL_1H);
     let arr = normalizeArray(data);
+    // OpenF1 returns rows in meeting_key order, which is not chronological.
+    arr = sortChampionshipRowsChronologically(arr);
     const grouped = groupChampionshipTeams(arr);
 
     ensureRefreshInterval(key, url, TTL_1H);
@@ -3903,10 +3967,16 @@ f1.get("/standings", async (req, res) => {
       TTL_1H,
     ).catch(() => {});
 
-    const driversRaw = normalizeArray(cache.get("championship_drivers")?.data);
-    const teamsRaw = normalizeArray(cache.get("championship_teams")?.data);
+    const driversRaw = sortChampionshipRowsChronologically(
+      normalizeArray(cache.get("championship_drivers")?.data),
+    );
+    const teamsRaw = sortChampionshipRowsChronologically(
+      normalizeArray(cache.get("championship_teams")?.data),
+    );
 
-    // Build latest-per-driver from championship_drivers (take last object in array for each driver)
+    // Build latest-per-driver from championship_drivers. Rows are in
+    // chronological order, so the last object per driver is the true latest
+    // (meeting_key numeric order is NOT chronological in OpenF1).
     const driversByNumber = Object.create(null);
     for (const d of driversRaw) {
       const dn = String(d?.driver_number ?? d?.driverNumber ?? "");
@@ -3931,7 +4001,7 @@ f1.get("/standings", async (req, res) => {
       });
     }
 
-    // Build latest-per-team from championship_teams
+    // Build latest-per-team from championship_teams (chronologically sorted)
     const teamsByName = Object.create(null);
     for (const t of teamsRaw) {
       const tn = String(t?.team_name ?? t?.teamName ?? "");

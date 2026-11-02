@@ -91,7 +91,7 @@ const fixturePushToStartTokens = new Map();
 const liveActivityTokens = new Map();
 const liveActivityTokenOwners = new Map();
 const liveActivityBaseProps = new Map();
-const MLB_LIVE_ACTIVITY_POLL_MS = 5000;
+const MLB_LIVE_ACTIVITY_POLL_MS = 15000;
 const MLB_LIVE_ACTIVITY_IDLE_POLL_MS = 60 * 1000; // 60s when no tokens registered
 const MLB_LIVE_ACTIVITY_DISMISSAL_MS = 15 * 60 * 1000;
 const MLB_LIVE_ACTIVITY_HYDRATE = "linescore,previousPlay";
@@ -676,7 +676,7 @@ const mlbNotifState = {
   gameStates: new Map(),
 };
 
-const MLB_NOTIF_POLL_MS = 5000;
+const MLB_NOTIF_POLL_MS = 15000;
 const MLB_NOTIF_IDLE_POLL_MS = 5 * 60 * 1000; // 5 min when no games or all finished
 const MLB_NOTIF_PRE_START_MS = 30 * 60 * 1000;
 const MLB_NOTIF_IDLE_RETRY_MS = 5 * 60 * 1000;
@@ -684,7 +684,7 @@ const MLB_SUBSCRIBER_CACHE_MS = 60 * 1000; // cache subscribers for 60s
 
 // Shared schedule cache to avoid duplicate fetches between loops
 let sharedScheduleCache = { dateStr: null, data: null, fetchedAt: 0 };
-const SHARED_SCHEDULE_TTL_MS = 5000; // 5s shared cache
+const SHARED_SCHEDULE_TTL_MS = 15000; // shared cache between the two loops
 
 async function getSharedSchedule(dateStr) {
   const now = Date.now();

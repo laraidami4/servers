@@ -1,5 +1,6 @@
 const express = require("express");
 const cors = require("cors");
+const compression = require("compression");
 const axios = require("axios");
 const cron = require("node-cron");
 require("dotenv").config();
@@ -643,6 +644,8 @@ const PORT = process.env.PORT || 3000;
 
 // Middleware
 app.use(cors());
+// Gzip responses to cut Railway network egress on large JSON payloads
+app.use(compression());
 // Capture raw request body for webhook signature verification
 app.use(
   express.json({
@@ -1224,18 +1227,38 @@ app.get("/api/athlete/:sport/:id", async (req, res) => {
     const oddsMarkets =
       getPlayerOddsFromCache(sportKey, athlete) || athlete.odds || [];
 
-    // Fetch gamelog from ESPN web API for the sport
+    // Fetch gamelog from ESPN web API for the sport (cached to avoid
+    // re-fetching the same athlete's gamelog on every request)
     const webBase =
       (ESPN_PATHS[sportKey] && ESPN_PATHS[sportKey].web) || ESPN_WEB_API_URL;
+    const GAMELOG_CACHE_TTL_MS = 2 * 60 * 1000; // 2 min
+    if (!globalThis.__gamelogCache) globalThis.__gamelogCache = {};
+    const gamelogCacheKey = `${sportKey}:${athleteId}`;
+    const cachedGamelogEntry = globalThis.__gamelogCache[gamelogCacheKey];
     let gamelog = null;
-    try {
-      const resp = await axios.get(`${webBase}/athletes/${athleteId}/gamelog`);
-      gamelog = resp.data;
-    } catch (e) {
-      console.warn(
-        `[Athlete:${sportKey}] failed to fetch gamelog for ${athleteId}:`,
-        e?.message || e,
-      );
+    if (
+      cachedGamelogEntry &&
+      Date.now() - cachedGamelogEntry.fetchedAt < GAMELOG_CACHE_TTL_MS
+    ) {
+      gamelog = cachedGamelogEntry.data;
+    } else {
+      try {
+        const resp = await axios.get(
+          `${webBase}/athletes/${athleteId}/gamelog`,
+        );
+        gamelog = resp.data;
+        globalThis.__gamelogCache[gamelogCacheKey] = {
+          data: gamelog,
+          fetchedAt: Date.now(),
+        };
+      } catch (e) {
+        console.warn(
+          `[Athlete:${sportKey}] failed to fetch gamelog for ${athleteId}:`,
+          e?.message || e,
+        );
+        // Serve stale cache on failure if available
+        if (cachedGamelogEntry) gamelog = cachedGamelogEntry.data;
+      }
     }
 
     const parsedGamelog = parseGamelogIntoGames(gamelog, 20);
