@@ -514,15 +514,56 @@ function normalizeUtcDateKey(value) {
   return parsed.toISOString().slice(0, 10);
 }
 
-function getSessionDateKey(session) {
-  return normalizeDateKey(
+// Parses an F1 gmt_offset like "-08:00:00", "+05:30" or "-0800" into
+// milliseconds. Returns null when the value is missing/unparseable.
+function parseGmtOffsetMs(value) {
+  if (value === null || value === undefined || value === "") return null;
+  const raw = String(value).trim();
+  const match = raw.match(/^([+-])(\d{1,2}):?(\d{2})(?::?(\d{2}))?$/);
+  if (!match) return null;
+  const sign = match[1] === "-" ? -1 : 1;
+  const hours = Number(match[2]);
+  const minutes = Number(match[3]);
+  const seconds = Number(match[4] || 0);
+  if (
+    !Number.isFinite(hours) ||
+    !Number.isFinite(minutes) ||
+    !Number.isFinite(seconds)
+  ) {
+    return null;
+  }
+  return sign * (hours * 3600 + minutes * 60 + seconds) * 1000;
+}
+
+function getSessionDateKey(session, offsetSource) {
+  const raw =
     session?.date_start ||
-      session?.dateStart ||
-      session?.date ||
-      session?.date_end ||
-      session?.dateEnd ||
-      null,
-  );
+    session?.dateStart ||
+    session?.date ||
+    session?.date_end ||
+    session?.dateEnd ||
+    null;
+  if (!raw) return null;
+
+  const gmtOffset =
+    session?.gmt_offset ??
+    session?.gmtOffset ??
+    offsetSource?.gmt_offset ??
+    offsetSource?.gmtOffset ??
+    null;
+  const offsetMs = parseGmtOffsetMs(gmtOffset);
+
+  if (offsetMs !== null) {
+    const ms = parseDateMs(raw);
+    if (ms !== null) {
+      // Shift the UTC instant by the event's local offset so slicing the UTC
+      // ISO string yields the LOCAL calendar date. e.g. a Las Vegas night
+      // session starting 2026-11-20T00:30:00Z (-08:00) belongs to 2026-11-19.
+      return new Date(ms + offsetMs).toISOString().slice(0, 10);
+    }
+  }
+
+  return normalizeDateKey(raw);
 }
 
 function parseDateMs(value) {
@@ -693,7 +734,7 @@ function enrichSessionForDateView(session, meeting, resultsArr, driversArr) {
 
   return {
     ...session,
-    session_date: getSessionDateKey(session),
+    session_date: getSessionDateKey(session, meeting),
     date_start: session?.date_start || session?.dateStart || null,
     date_end: session?.date_end || session?.dateEnd || null,
     meeting: meeting || null,
@@ -1743,7 +1784,11 @@ app.get("/racing/date/:date?", async (req, res) => {
 
     const enriched = sessionsArr
       .filter((session) => {
-        const sessionDate = getSessionDateKey(session);
+        const meetingKey = session?.meeting_key || session?.meetingKey || null;
+        const meeting = meetingKey
+          ? meetingsByKey[String(meetingKey)] || null
+          : null;
+        const sessionDate = getSessionDateKey(session, meeting);
         return !normalizedDate || sessionDate === normalizedDate;
       })
       .map((session) => {
@@ -1933,11 +1978,11 @@ app.get("/racing/date/:date?", async (req, res) => {
       // Return unique dates only (no time, deduplicated)
       const allDates = new Set();
       for (const session of enriched) {
-        const dateStart = session.date_start || null;
-        if (dateStart) {
-          const normalized = normalizeDateKey(dateStart);
-          if (normalized) allDates.add(normalized);
-        }
+        // Use the event-local calendar date (gmt_offset applied) so late
+        // UTC-night sessions land on the correct local day.
+        const normalized =
+          session.session_date || getSessionDateKey(session, session.meeting);
+        if (normalized) allDates.add(normalized);
       }
       for (const race of nascarRacesArr) {
         const dateStart = race.date_start || null;
