@@ -101,8 +101,12 @@ const RATE_LIMIT_PER_MIN = 60;
 // rarely needs to throttle. This is the fastest pacing that reliably avoids
 // 429s (verified against the live API).
 const MIN_DISPATCH_GAP_MS = 170;
-// When OpenF1 returns 429 we pause the whole queue for this long before retrying.
-const RATE_LIMIT_COOLDOWN_MS = 10 * 1000;
+// When OpenF1 returns 429 we pause the whole queue before retrying. The pause
+// escalates on consecutive 429s (2s -> 4s -> 8s -> 15s cap) and resets after a
+// successful request. A flat 10s pause meant a single transient 429 cost the
+// user 10s on `/f1/session`, which is far worse than the 429 itself.
+const RATE_LIMIT_COOLDOWN_BASE_MS = 2 * 1000;
+const RATE_LIMIT_COOLDOWN_MAX_MS = 15 * 1000;
 
 // Priority levels (lower number = higher priority).
 const PRIORITY = {
@@ -122,6 +126,8 @@ const rateLimiter = {
   lastDispatchAt: 0,
   // if set, the queue is paused until this timestamp (used after a 429)
   cooldownUntil: 0,
+  // consecutive 429s since the last success (drives the escalating backoff)
+  cooldownStreak: 0,
 
   // Remove timestamps older than 60s (the widest window we track).
   prune(now) {
@@ -159,12 +165,21 @@ const rateLimiter = {
   // clear `recent` — forgetting the requests we just made would make the
   // limiter think it has budget again and immediately re-fire into the same
   // 429. Keeping the window intact lets it drain naturally during the cooldown.
+  // Returns the applied pause so callers can log the real duration.
   applyCooldown() {
     const now = Date.now();
-    this.cooldownUntil = Math.max(
-      this.cooldownUntil,
-      now + RATE_LIMIT_COOLDOWN_MS,
+    this.cooldownStreak += 1;
+    const backoff = Math.min(
+      RATE_LIMIT_COOLDOWN_BASE_MS * 2 ** (this.cooldownStreak - 1),
+      RATE_LIMIT_COOLDOWN_MAX_MS,
     );
+    this.cooldownUntil = Math.max(this.cooldownUntil, now + backoff);
+    return backoff;
+  },
+
+  // Called after a successful OpenF1 request: clear the 429 backoff streak.
+  noteSuccess() {
+    this.cooldownStreak = 0;
   },
 
   enqueue(task) {
@@ -229,19 +244,21 @@ async function f1Get(url, config = {}, priority = PRIORITY.NORMAL) {
   while (true) {
     attempt++;
     try {
-      return await scheduleOpenF1(async () => {
+      const response = await scheduleOpenF1(async () => {
         const token = await getOpenF1Token();
         const headers = { ...(config.headers || {}) };
         if (token) headers.Authorization = `Bearer ${token}`;
         return axios.get(url, { ...config, headers });
       }, priority);
+      rateLimiter.noteSuccess();
+      return response;
     } catch (err) {
       if (isRateLimitError(err) && attempt < maxAttempts) {
         // Pause the whole queue; the pump will wait out the cooldown before
         // dispatching this retry (no separate sleep needed).
-        rateLimiter.applyCooldown();
+        const cooldownMs = rateLimiter.applyCooldown();
         console.warn(
-          `[rate-limit] 429 for ${url}; cooling down ${RATE_LIMIT_COOLDOWN_MS}ms (attempt ${attempt}/${maxAttempts})`,
+          `[rate-limit] 429 for ${url}; cooling down ${cooldownMs}ms (attempt ${attempt}/${maxAttempts})`,
         );
         continue;
       }
@@ -2674,27 +2691,66 @@ async function buildAndCacheSessionInner(sessionKey, options, priority) {
     // which is why `/f1/session` returned `"location": {}`. Fall back to the REST
     // `location` resource and keep the latest sample per driver so the response
     // shape matches the live path.
+    //
+    // PERF: a full-session location payload is enormous (~48 MB / ~34s for a
+    // 1-hour practice), which made `/f1/session` take 10s+ to respond. We only
+    // need the LATEST position per driver, so query just the tail of the session
+    // (a few minutes) instead — that is ~1-2 MB and ~1-2s.
     if (Object.keys(locationMap).length === 0) {
-      try {
-        const locationPath = `location?session_key=${encodeURIComponent(sessionKey)}`;
-        const locationUrl = `${BASE_URL}${locationPath}`;
-        // A full-session location payload is large (tens of thousands of rows),
-        // so it needs a much longer timeout than the default 10s used elsewhere.
-        const cachedLocation = cache.get(locationPath);
-        let locationRows = null;
+      const LOCATION_TAIL_MS = 3 * 60 * 1000; // last 3 minutes of the session
+      const endMs = new Date(
+        sessionObj.date_end || sessionObj.dateEnd,
+      ).getTime();
+      const nowMs = Date.now();
+      const windowEndMs = Number.isFinite(endMs)
+        ? Math.min(endMs, nowMs)
+        : nowMs;
+      const windowStartMs = windowEndMs - LOCATION_TAIL_MS;
+
+      const buildLocationPath = (fromMs, toMs) =>
+        `location?session_key=${encodeURIComponent(sessionKey)}` +
+        `&date>=${new Date(fromMs).toISOString()}` +
+        `&date<=${new Date(toMs).toISOString()}`;
+
+      const loadLocationRows = async (path, timeoutMs) => {
+        const cached = cache.get(path);
         if (
-          cachedLocation &&
-          Date.now() - cachedLocation.fetchedAt < capTTLForRestriction(ttl)
+          cached &&
+          Date.now() - cached.fetchedAt < capTTLForRestriction(ttl)
         ) {
-          locationRows = normalizeArray(cachedLocation.data);
-        } else {
-          const resp = await f1Get(locationUrl, { timeout: 90000 }, priority);
-          locationRows = normalizeArray(resp.data);
-          cache.set(locationPath, {
-            data: resp.data,
-            fetchedAt: Date.now(),
-          });
+          return normalizeArray(cached.data);
         }
+        const resp = await f1Get(
+          `${BASE_URL}${path}`,
+          { timeout: timeoutMs },
+          priority,
+        );
+        cache.set(path, { data: resp.data, fetchedAt: Date.now() });
+        return normalizeArray(resp.data);
+      };
+
+      try {
+        let locationRows = [];
+        try {
+          locationRows = await loadLocationRows(
+            buildLocationPath(windowStartMs, windowEndMs),
+            30000,
+          );
+        } catch (e) {
+          console.warn(
+            `[session] windowed location fetch failed for ${sessionKey}: ${e.message}`,
+          );
+        }
+
+        // If the tail window came back empty (e.g. a session with no data near
+        // its scheduled end), fall back to the full-session query.
+        if (locationRows.length === 0) {
+          locationRows = await loadLocationRows(
+            `location?session_key=${encodeURIComponent(sessionKey)}`,
+            90000,
+          );
+        }
+
         // Rows arrive in chronological order. Prefer the last row that has
         // real coordinates — the API pads the tail of a session with zeroed
         // x/y/z samples, which would otherwise become the "latest" position.
