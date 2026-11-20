@@ -2668,6 +2668,66 @@ async function buildAndCacheSessionInner(sessionKey, options, priority) {
       // ignore live merge errors
     }
 
+    // --- location fallback via REST ---
+    // MQTT only carries *live* location pushes. A finished session (or a server
+    // that started after the session ended) therefore has an empty location map,
+    // which is why `/f1/session` returned `"location": {}`. Fall back to the REST
+    // `location` resource and keep the latest sample per driver so the response
+    // shape matches the live path.
+    if (Object.keys(locationMap).length === 0) {
+      try {
+        const locationPath = `location?session_key=${encodeURIComponent(sessionKey)}`;
+        const locationUrl = `${BASE_URL}${locationPath}`;
+        // A full-session location payload is large (tens of thousands of rows),
+        // so it needs a much longer timeout than the default 10s used elsewhere.
+        const cachedLocation = cache.get(locationPath);
+        let locationRows = null;
+        if (
+          cachedLocation &&
+          Date.now() - cachedLocation.fetchedAt < capTTLForRestriction(ttl)
+        ) {
+          locationRows = normalizeArray(cachedLocation.data);
+        } else {
+          const resp = await f1Get(locationUrl, { timeout: 90000 }, priority);
+          locationRows = normalizeArray(resp.data);
+          cache.set(locationPath, {
+            data: resp.data,
+            fetchedAt: Date.now(),
+          });
+        }
+        // Rows arrive in chronological order. Prefer the last row that has
+        // real coordinates — the API pads the tail of a session with zeroed
+        // x/y/z samples, which would otherwise become the "latest" position.
+        const lastReal = Object.create(null);
+        const lastAny = Object.create(null);
+        for (const it of locationRows) {
+          const dn = String(it?.driver_number ?? it?.driverNumber ?? "");
+          if (!dn) continue;
+          const copy = { ...it };
+          delete copy.meeting_key;
+          delete copy.session_key;
+          lastAny[dn] = copy;
+          const x = Number(copy.x);
+          const y = Number(copy.y);
+          if (
+            Number.isFinite(x) &&
+            Number.isFinite(y) &&
+            (x !== 0 || y !== 0)
+          ) {
+            lastReal[dn] = copy;
+          }
+        }
+        for (const dn of Object.keys(lastAny)) {
+          locationMap[dn] = lastReal[dn] || lastAny[dn];
+          driversSet.add(dn);
+        }
+      } catch (e) {
+        console.warn(
+          `[session] location fallback failed for ${sessionKey}: ${e.message}`,
+        );
+      }
+    }
+
     // --- build positions map from 'position' resource scoped to this session ---
     const positionsMap = buildPositionIntervals({
       sessionObj,
