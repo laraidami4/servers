@@ -760,6 +760,72 @@ function enrichSessionForDateView(session, meeting, resultsArr, driversArr) {
   };
 }
 
+// Resolve the driver currently in position 1 for a session. Prefers the final
+// `session_result` classification, then the last position interval, then the
+// starting grid, and finally the caller's time-based fallback. This is the
+// authoritative "leader" used for behind-time calculations, so a mis-detected
+// leader from summed lap times cannot override the actual position 1 driver.
+function resolveLeaderDriverNumber({
+  positionsMap,
+  sessionResultArr,
+  startingGridArr,
+  fallbackDriver,
+} = {}) {
+  const toDriverNumber = (value) => {
+    if (value == null) return null;
+    const str = String(value).trim();
+    return str ? str : null;
+  };
+  const isPositionOne = (value) => {
+    if (value == null) return false;
+    const parsed = Number(value);
+    return Number.isFinite(parsed) && parsed === 1;
+  };
+
+  // 1. Final classification — most authoritative for a finished race.
+  const results = Array.isArray(sessionResultArr) ? sessionResultArr : [];
+  const winner = results.find((row) => isPositionOne(row?.position));
+  const winnerDriver = toDriverNumber(
+    winner?.driver_number ?? winner?.driverNumber ?? winner?.driver,
+  );
+  if (winnerDriver) return winnerDriver;
+
+  // 2. Last position interval per driver (latest interval that says position 1).
+  const positions =
+    positionsMap && typeof positionsMap === "object" ? positionsMap : {};
+  let bestDriver = null;
+  let bestStart = -Infinity;
+  for (const dn of Object.keys(positions)) {
+    const entry = positions[dn];
+    const record = Array.isArray(entry?.record) ? entry.record : [];
+    const last = record.length > 0 ? record[record.length - 1] : null;
+    const position = last?.position ?? entry?.position ?? null;
+    if (!isPositionOne(position)) continue;
+    const start = Number(last?.start);
+    const startValue = Number.isFinite(start) ? start : -Infinity;
+    if (startValue > bestStart) {
+      bestStart = startValue;
+      bestDriver = toDriverNumber(dn);
+    }
+  }
+  if (bestDriver) return bestDriver;
+
+  // 3. Starting grid pole sitter.
+  const grid = Array.isArray(startingGridArr) ? startingGridArr : [];
+  const pole = grid.find((row) =>
+    isPositionOne(
+      row?.position_start ?? row?.positionStart ?? row?.position ?? null,
+    ),
+  );
+  const poleDriver = toDriverNumber(
+    pole?.driver_number ?? pole?.driverNumber ?? pole?.driver,
+  );
+  if (poleDriver) return poleDriver;
+
+  // 4. Caller-supplied time-based fallback.
+  return toDriverNumber(fallbackDriver);
+}
+
 function buildPositionIntervals({
   sessionObj,
   sessionKey,
@@ -2796,6 +2862,21 @@ async function buildAndCacheSessionInner(sessionKey, options, priority) {
 
     // --- build laps map per driver: last valid lap + fastest lap and fastest st_speed ---
     const lapsByDriver = Object.create(null);
+    // Behind values from the previous build, used as the "last behind time" when
+    // a freshly computed gap is rejected as implausible.
+    const previousBehindByDriver = Object.create(null);
+    try {
+      const previousAssembled = cache.get(cacheKey)?.data;
+      const previousByDriver = previousAssembled?.laps?.byDriver;
+      if (previousByDriver && typeof previousByDriver === "object") {
+        for (const dn of Object.keys(previousByDriver)) {
+          const behind = previousByDriver[dn]?.driver_time?.behind;
+          if (behind != null) previousBehindByDriver[dn] = behind;
+        }
+      }
+    } catch (e) {
+      // ignore previous-build lookup errors
+    }
     try {
       const lapsArr = resources.laps || [];
       // ensure chronological order
@@ -3086,20 +3167,60 @@ async function buildAndCacheSessionInner(sessionKey, options, priority) {
           const leadByTime =
             leadCandidates.length > 0 ? leadCandidates : allDriverEntries;
           leadByTime.sort((a, b) => a[1].totalTime - b[1].totalTime);
-          leaderDriver = leadByTime[0][0];
-          leaderTotalTime = leadByTime[0][1].totalTime;
-          leaderLapNumber = leadByTime[0][1].currentLap || maxLap || null;
+          const timeBasedLeader = leadByTime[0][0];
+
+          // The summed-lap-time heuristic can mis-rank drivers when sectors are
+          // missing or laps are interpolated. The driver actually in position 1
+          // must always be the reference, so resolve the real leader from the
+          // position data and only fall back to the time heuristic when no
+          // position information exists at all.
+          const positionLeader = resolveLeaderDriverNumber({
+            positionsMap,
+            sessionResultArr: resources.session_result || [],
+            startingGridArr: starting_grid || [],
+            fallbackDriver: timeBasedLeader,
+          });
+          const leaderEntry = positionLeader
+            ? driverTimes[positionLeader]
+            : null;
+          const hasLeaderTime = leaderEntry && leaderEntry.totalTime != null;
+
+          leaderDriver =
+            positionLeader && hasLeaderTime ? positionLeader : timeBasedLeader;
+          leaderTotalTime = hasLeaderTime
+            ? leaderEntry.totalTime
+            : leadByTime[0][1].totalTime;
+          leaderLapNumber = hasLeaderTime
+            ? (leaderEntry.currentLap ?? maxLap ?? null)
+            : (leadByTime[0][1].currentLap ?? maxLap ?? null);
+
+          // Position 1 always uses its own time — never a computed behind value.
+          const leaderInfo = lapsByDriver[leaderDriver];
+          if (leaderInfo && leaderInfo.driver_time) {
+            leaderInfo.driver_time.behind = null;
+          }
 
           for (const [dn, v] of allDriverEntries) {
+            if (String(dn) === String(leaderDriver)) continue;
             const info = lapsByDriver[dn];
             if (!info || !info.driver_time) continue;
             const lapDiff = (leaderLapNumber || 0) - (v.currentLap || 0);
             if (lapDiff >= 1) {
               info.driver_time.behind = formatLapGap(lapDiff);
             } else if (leaderTotalTime != null && v.totalTime != null) {
-              info.driver_time.behind = formatGap(
-                Math.abs(leaderTotalTime - v.totalTime),
-              );
+              // A driver cannot be "behind" by more than the leader's own time.
+              // When the computed gap exceeds the leader's time, the summed lap
+              // times are unreliable for this driver, so keep the last behind
+              // value already recorded for them instead of emitting a bogus gap.
+              const gap = Math.abs(leaderTotalTime - v.totalTime);
+              if (gap > leaderTotalTime) {
+                const previousBehind =
+                  previousBehindByDriver[dn] ?? info.driver_time.behind;
+                info.driver_time.behind =
+                  previousBehind != null ? previousBehind : "0.000";
+              } else {
+                info.driver_time.behind = formatGap(gap);
+              }
             }
           }
         } else {
