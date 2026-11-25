@@ -1,0 +1,8 @@
+node_modules/
+.env
+.env.*
+npm-debug.log*
+
+# Apple Music developer private key — must never be committed.
+AuthKey_*.p8
+*.p8
